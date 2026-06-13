@@ -1,0 +1,26 @@
+{
+  "name": "cervemap",
+  "private": true,
+  "version": "2.0.0",
+  "type": "module",
+  "description": "Elige bar en Sevilla segun sol/sombra para tomar cerveza, con 3D y sombras reales de edificios.",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "test": "node geometry.test.mjs"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "maplibre-gl": "^4.7.1",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "suncalc": "^1.9.0"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^4.3.4",
+    "vite": "^5.4.11"
+  }
+}

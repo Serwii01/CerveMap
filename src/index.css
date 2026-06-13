@@ -1,0 +1,413 @@
+:root,
+:root[data-theme='dark'] {
+  --bg: #0f1115;
+  --surface: #181b22;
+  --surface-2: #20242e;
+  --border: #2a2f3a;
+  --text: #e7eaf0;
+  --muted: #9aa3b2;
+  --accent: #f5a524;
+  --accent-2: #7aa2f7;
+  --scrim: rgba(15, 17, 21, 0.95);
+  --radius: 14px;
+  --shadow: 0 8px 30px rgba(0, 0, 0, 0.45);
+  color-scheme: dark;
+}
+
+:root[data-theme='light'] {
+  --bg: #eef1f6;
+  --surface: #ffffff;
+  --surface-2: #eef1f6;
+  --border: #d6dbe4;
+  --text: #1b2230;
+  --muted: #5b6472;
+  --accent: #f5a524;
+  --accent-2: #2f6df0;
+  --scrim: rgba(238, 241, 246, 0.95);
+  --shadow: 0 8px 30px rgba(20, 30, 50, 0.2);
+  color-scheme: light;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  font-family: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  -webkit-font-smoothing: antialiased;
+}
+
+.app {
+  position: relative;
+  height: 100dvh;
+  width: 100%;
+  overflow: hidden;
+}
+
+/* ---------- Mapa ---------- */
+.map {
+  position: absolute;
+  inset: 0;
+  height: 100%;
+  width: 100%;
+  background: var(--bg);
+  z-index: 0;
+}
+
+/* Controles MapLibre en tono oscuro */
+.maplibregl-ctrl-group {
+  background: var(--surface);
+  border: 1px solid var(--border);
+}
+.maplibregl-ctrl-group button + button {
+  border-top: 1px solid var(--border);
+}
+.maplibregl-ctrl-attrib {
+  background: rgba(15, 17, 21, 0.7) !important;
+}
+.maplibregl-ctrl-attrib a {
+  color: var(--muted) !important;
+}
+
+/* ---------- Topbar ---------- */
+.topbar {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 600;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 14px;
+  background: linear-gradient(180deg, var(--scrim), transparent);
+  pointer-events: none;
+}
+.topbar h1 {
+  font-size: 17px;
+  margin: 0;
+  font-weight: 700;
+}
+.topbar .sub {
+  font-size: 12px;
+  font-weight: 400;
+  color: var(--muted);
+  display: block;
+}
+.topbar-actions {
+  display: flex;
+  gap: 8px;
+  pointer-events: auto;
+}
+.toggle-panel,
+.mode-btn {
+  pointer-events: auto;
+  background: var(--surface);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 6px 14px;
+  font-size: 13px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.mode-btn.active {
+  background: var(--accent);
+  color: #1a1206;
+  border-color: var(--accent);
+  font-weight: 700;
+}
+.icon-btn {
+  pointer-events: auto;
+  background: var(--surface);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  width: 34px;
+  height: 32px;
+  font-size: 15px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+}
+
+/* ---------- Panel ---------- */
+.panel {
+  position: absolute;
+  z-index: 600;
+  left: 8px;
+  right: 8px;
+  bottom: 8px;
+  background: color-mix(in srgb, var(--surface) 94%, transparent);
+  backdrop-filter: blur(10px);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  padding: 14px;
+  transition: transform 0.25s ease, opacity 0.25s ease;
+  max-height: 78dvh;
+  overflow-y: auto;
+}
+.panel.closed {
+  transform: translateY(120%);
+  opacity: 0;
+  pointer-events: none;
+}
+
+.panel-grid {
+  display: flex;
+  gap: 14px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+/* ---------- Brujula ---------- */
+.compass {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+}
+.compass-ring {
+  fill: var(--surface-2);
+  stroke: var(--border);
+  stroke-width: 2;
+}
+.compass-card {
+  fill: var(--muted);
+  font-size: 10px;
+  font-weight: 600;
+}
+.compass-needle {
+  stroke: var(--accent);
+  stroke-width: 3;
+  stroke-linecap: round;
+}
+.compass-sun {
+  fill: var(--accent);
+}
+.compass-center {
+  fill: var(--text);
+  font-size: 13px;
+  font-weight: 700;
+}
+.compass-meta {
+  display: flex;
+  gap: 14px;
+  font-size: 12px;
+}
+.compass-meta div {
+  display: flex;
+  flex-direction: column;
+  text-align: center;
+}
+
+/* ---------- Info ---------- */
+.info-block {
+  flex: 1;
+  min-width: 180px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.info-row {
+  display: flex;
+  flex-direction: column;
+  font-size: 14px;
+}
+.muted {
+  color: var(--muted);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+/* ---------- Controles de hora ---------- */
+.time-controls {
+  margin-top: 14px;
+}
+.time-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+.date-input {
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: 8px;
+  padding: 6px 8px;
+  font-size: 13px;
+  color-scheme: dark;
+}
+.time-display {
+  font-size: 22px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  margin-left: auto;
+}
+.now-btn {
+  background: var(--accent);
+  color: #1a1206;
+  border: none;
+  border-radius: 8px;
+  padding: 7px 14px;
+  font-weight: 700;
+  font-size: 13px;
+  cursor: pointer;
+}
+.now-btn:hover {
+  filter: brightness(1.08);
+}
+.time-slider {
+  width: 100%;
+  accent-color: var(--accent);
+  height: 28px;
+}
+.slider-scale {
+  display: flex;
+  justify-content: space-between;
+  font-size: 10px;
+  color: var(--muted);
+  margin-top: -2px;
+}
+
+/* ---------- Leyenda ---------- */
+.legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 14px;
+  margin-top: 12px;
+  font-size: 12px;
+}
+.legend-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.legend-item i {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  display: inline-block;
+}
+
+.disclaimer {
+  margin: 12px 0 0;
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--muted);
+  background: var(--surface-2);
+  border-radius: 10px;
+  padding: 10px;
+}
+.disclaimer.ok {
+  color: #cfe9d4;
+  background: rgba(53, 122, 78, 0.18);
+  border: 1px solid rgba(53, 122, 78, 0.4);
+}
+
+/* ---------- Popups ---------- */
+.popup {
+  min-width: 180px;
+  font-family: inherit;
+}
+.popup-name {
+  font-size: 15px;
+  display: block;
+}
+.popup-addr {
+  font-size: 12px;
+  color: #555;
+  margin-top: 2px;
+}
+.popup-eval {
+  font-weight: 700;
+  margin-top: 6px;
+  font-size: 14px;
+}
+.popup-note {
+  font-size: 12px;
+  margin-top: 4px;
+  color: #333;
+}
+.popup-terrace {
+  margin-top: 6px;
+  color: #777 !important;
+}
+.maplibregl-popup-content {
+  color: #1a1a1a;
+  border-radius: 10px;
+  padding: 12px 14px;
+}
+
+/* ---------- Overlays de estado ---------- */
+.overlay {
+  position: absolute;
+  z-index: 550;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  padding: 22px 26px;
+  text-align: center;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  max-width: 86%;
+}
+.spinner {
+  width: 34px;
+  height: 34px;
+  border: 3px solid var(--border);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.count-badge {
+  position: absolute;
+  top: 58px;
+  left: 14px;
+  z-index: 550;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 4px 12px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+/* ---------- Responsive: pantallas grandes ---------- */
+@media (min-width: 720px) {
+  .panel {
+    left: 14px;
+    right: auto;
+    bottom: 14px;
+    width: 380px;
+  }
+  .topbar h1 {
+    font-size: 19px;
+  }
+}
