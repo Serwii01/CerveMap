@@ -6,8 +6,8 @@ import Supercluster from 'supercluster';
 
 // Colores de cluster según la mayoría sol/sombra.
 export const CLUSTER_COLORS = {
-  sun: '#f5a524', // >60% al sol
-  shade: '#5b6172', // >60% en sombra
+  sun: '#f5a524', // >55% al sol
+  shade: '#5b6172', // >55% en sombra
   mixed: '#e0c23c', // mezcla
 };
 
@@ -17,7 +17,7 @@ export const CLUSTER_COLORS = {
  */
 export function buildClusterIndex(features) {
   const index = new Supercluster({
-    radius: 60,
+    radius: 50,
     maxZoom: 16,
     minZoom: 0,
     map: (props) => ({
@@ -33,10 +33,10 @@ export function buildClusterIndex(features) {
   return index;
 }
 
-/** Color del cluster según la mayoría (>60%). */
+/** Color del cluster según la mayoría (>55%). */
 export function clusterColor(sun, shade, count) {
-  if (count > 0 && sun / count > 0.6) return CLUSTER_COLORS.sun;
-  if (count > 0 && shade / count > 0.6) return CLUSTER_COLORS.shade;
+  if (count > 0 && sun / count > 0.55) return CLUSTER_COLORS.sun;
+  if (count > 0 && shade / count > 0.55) return CLUSTER_COLORS.shade;
   return CLUSTER_COLORS.mixed;
 }
 

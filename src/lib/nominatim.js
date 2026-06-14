@@ -2,14 +2,15 @@
  * Cliente de Nominatim (OpenStreetMap) para buscar ciudades y geocodificación
  * inversa. Sin API key.
  *
- * Nota sobre el User-Agent: la política de Nominatim pide identificar la app,
- * pero los navegadores NO permiten fijar la cabecera `User-Agent` desde `fetch`
- * (está en la lista de cabeceras prohibidas y se ignora silenciosamente). En su
- * lugar el navegador envía el `Referer` automáticamente, que es lo que Nominatim
- * usa para apps web. Respetamos el rate limit (1 req/s) con debounce de 300 ms y
- * una sola petición activa a la vez (AbortController en el llamador).
+ * Nota sobre el User-Agent: enviamos `User-Agent: CerveMap/1.0` para identificar
+ * la app según la política de Nominatim. Importante: los navegadores tratan
+ * `User-Agent` como cabecera PROHIBIDA en `fetch` y la ignoran silenciosamente
+ * (en el navegador, Nominatim identifica la app por el `Referer` automático); la
+ * cabecera sí surte efecto si este módulo se usa en Node/SSR. Respetamos el rate
+ * limit (1 req/s) con debounce de 300 ms y una sola petición activa (AbortController).
  */
 const BASE = 'https://nominatim.openstreetmap.org';
+const HEADERS = { 'User-Agent': 'CerveMap/1.0' };
 
 function toPlace(r) {
   if (!r) return null;
@@ -39,7 +40,7 @@ export async function searchCities(q, signal) {
     addressdetails: '1',
     'accept-language': 'es',
   });
-  const res = await fetch(`${BASE}/search?${params}`, { signal });
+  const res = await fetch(`${BASE}/search?${params}`, { signal, headers: HEADERS });
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   const data = await res.json();
   return data.map(toPlace).filter(Boolean);
@@ -55,7 +56,7 @@ export async function reverseGeocode(lat, lon, signal) {
     addressdetails: '1',
     'accept-language': 'es',
   });
-  const res = await fetch(`${BASE}/reverse?${params}`, { signal });
+  const res = await fetch(`${BASE}/reverse?${params}`, { signal, headers: HEADERS });
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   return toPlace(await res.json());
 }

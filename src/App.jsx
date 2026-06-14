@@ -21,11 +21,13 @@ import { classifyBar, classifyByShadow, CATEGORY_META, CATEGORY } from './lib/cl
 import { openState } from './lib/hours.js';
 import { haversine, distanceText, formatDistance, walkMinutes } from './lib/geo.js';
 import { makeProjector, prepareBuilding, computeShadowData } from './lib/geometry.js';
-import { expandBbox, newAreaFraction, bboxCenter } from './lib/viewport.js';
-import { SEVILLA_CITY, loadSavedCity, saveCity, cityBounds } from './lib/city.js';
+import { expandBbox, bboxCenter } from './lib/viewport.js';
+import { getNewTiles, loadTilesConcurrent } from './lib/tiles.js';
+import { SEVILLA_CITY, loadSavedCity, saveCity } from './lib/city.js';
 
 const MIN_ZOOM_3D = 15;
-const MAX_BARS = 2000;
+const MAX_BARS = 3000;
+const INITIAL_ZOOM = 14;
 
 /** Texto relativo "hace X" a partir de un timestamp. */
 function formatAgo(ts) {
@@ -84,11 +86,12 @@ export default function App() {
   const [shadowStates, setShadowStates] = useState(null); // Uint8Array
   const [shadowRings, setShadowRings] = useState([]);
 
-  const loadedBboxRef = useRef(null);
+  const loadedTilesRef = useRef(new Set());
   const lastFetchKey = useRef(null);
   const barsCtrl = useRef(null);
   const focusKey = useRef(0);
   const watchRef = useRef(null);
+  const recenterRef = useRef({ t: 0, lat: 0, lng: 0 });
 
   // --- Tema ---
   useEffect(() => {
@@ -141,7 +144,7 @@ export default function App() {
     setShadowRings([]);
     setWeather(null);
     setBarsError(false);
-    loadedBboxRef.current = null;
+    loadedTilesRef.current = new Set();
     lastFetchKey.current = null;
     if (loc) setUserLoc(loc);
     setCity(c);
@@ -225,38 +228,58 @@ export default function App() {
     }
   }, [mode3d, sun, buildings, bars, LAT, LNG]);
 
-  // ===== Carga lazy de bares por viewport =====
-  const maybeLoadBars = useCallback((v, force = false) => {
-    if (!v) return;
-    const vp = expandBbox(v.bbox, 0.2);
-    if (!force && newAreaFraction(vp, loadedBboxRef.current) <= 0.3) return;
-    barsCtrl.current?.abort();
-    const ctrl = new AbortController();
-    barsCtrl.current = ctrl;
-    setBarsLoading(true);
-    fetchBarsInBbox(vp, ctrl.signal, { force })
-      .then((incoming) => {
-        loadedBboxRef.current = vp;
-        const center = bboxCenter(vp);
-        setBars((prev) => mergeBars(prev, incoming, center));
-        setBarsSavedAt(barsCacheInfo()?.savedAt ?? Date.now());
-        setBarsError(false);
-        setBarsLoading(false);
-      })
-      .catch((err) => {
-        if (err.name !== 'AbortError') {
-          setBarsError(true);
-          setBarsLoading(false);
-        }
-      });
-  }, []);
+  // ===== Carga lazy de bares por TILES =====
+  // bbox de la ciudad en [s,w,n,e] (city.bbox viene como [minlat,maxlat,minlon,maxlon]).
+  const cityBboxSWNE = useMemo(() => {
+    if (!city?.bbox) return null;
+    const [minlat, maxlat, minlon, maxlon] = city.bbox;
+    return [minlat, minlon, maxlat, maxlon];
+  }, [city]);
 
-  // moveend (en `view`) con debounce de 600 ms.
+  const loadTilesForView = useCallback(
+    (v, force = false) => {
+      if (!v) return;
+      if (force) loadedTilesRef.current = new Set();
+      const vp = expandBbox(v.bbox, 0.2);
+      const tiles = getNewTiles(vp, cityBboxSWNE, loadedTilesRef.current);
+      if (tiles.length === 0) return;
+      for (const t of tiles) loadedTilesRef.current.add(t.id); // marca optimista
+      barsCtrl.current?.abort();
+      const ctrl = new AbortController();
+      barsCtrl.current = ctrl;
+      setBarsLoading(true);
+      loadTilesConcurrent(
+        tiles,
+        (tile, sig) => fetchBarsInBbox(tile.bbox, sig, { force }),
+        4,
+        ctrl.signal,
+      )
+        .then(({ bars: incoming, failed }) => {
+          if (ctrl.signal.aborted) return;
+          // Los tiles que fallaron se desmarcan para poder reintentarlos.
+          for (const id of failed) loadedTilesRef.current.delete(id);
+          const center = bboxCenter(vp);
+          setBars((prev) => mergeBars(prev, incoming, center));
+          setBarsSavedAt(barsCacheInfo()?.savedAt ?? Date.now());
+          setBarsError(failed.length === tiles.length && incoming.length === 0);
+          setBarsLoading(false);
+        })
+        .catch((err) => {
+          if (err.name !== 'AbortError') {
+            setBarsError(true);
+            setBarsLoading(false);
+          }
+        });
+    },
+    [cityBboxSWNE],
+  );
+
+  // moveend (en `view`) con debounce de 500 ms.
   useEffect(() => {
     if (!view || !city) return;
-    const t = setTimeout(() => maybeLoadBars(view), 600);
+    const t = setTimeout(() => loadTilesForView(view), 500);
     return () => clearTimeout(t);
-  }, [view, city, maybeLoadBars]);
+  }, [view, city, loadTilesForView]);
 
   // --- Meteo (por ciudad) ---
   useEffect(() => {
@@ -395,7 +418,7 @@ export default function App() {
   // ===== Geolocalización =====
   const showToast = useCallback((msg) => {
     setToast(msg);
-    setTimeout(() => setToast(null), 4000);
+    setTimeout(() => setToast(null), 3000);
   }, []);
 
   const locateMe = useCallback(() => {
@@ -426,11 +449,19 @@ export default function App() {
       return;
     }
     setTracking(true);
+    recenterRef.current = { t: 0, lat: 0, lng: 0 };
     watchRef.current = navigator.geolocation.watchPosition(
       (pos) => {
         const loc = { lat: pos.coords.latitude, lng: pos.coords.longitude, accuracy: pos.coords.accuracy };
         setUserLoc(loc);
-        setFocus({ lng: loc.lng, lat: loc.lat, zoom: 16, key: ++focusKey.current });
+        // Recentra suavemente (easeTo) como mucho cada 5 s y solo si te has movido >20 m.
+        const now = Date.now();
+        const r = recenterRef.current;
+        const moved = haversine({ lat: r.lat, lng: r.lng }, loc);
+        if (now - r.t > 5000 && moved > 20) {
+          recenterRef.current = { t: now, lat: loc.lat, lng: loc.lng };
+          setFocus({ lng: loc.lng, lat: loc.lat, zoom: 16, key: ++focusKey.current, ease: true });
+        }
       },
       () => {
         showToast('Activa la ubicación para ver bares cercanos');
@@ -476,7 +507,7 @@ export default function App() {
         focus={focus}
         userLoc={userLoc}
         initialCenter={[city.lon, city.lat]}
-        initialBounds={cityBounds(city)}
+        initialZoom={INITIAL_ZOOM}
       />
 
       {canInstall && (
@@ -646,7 +677,7 @@ export default function App() {
           <button
             className="link-btn"
             type="button"
-            onClick={() => maybeLoadBars(view, true)}
+            onClick={() => loadTilesForView(view, true)}
             disabled={barsLoading || !view}
           >
             ↻ Recargar
@@ -664,7 +695,7 @@ export default function App() {
       {barsError && bars.length === 0 && (
         <div className="overlay">
           <p>No se pudieron cargar los bares (Overpass).</p>
-          <button className="now-btn" onClick={() => maybeLoadBars(view, true)} type="button">
+          <button className="now-btn" onClick={() => loadTilesForView(view, true)} type="button">
             Reintentar
           </button>
         </div>

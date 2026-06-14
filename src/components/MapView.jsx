@@ -100,7 +100,7 @@ export default function MapView({
   focus,
   userLoc,
   initialCenter,
-  initialBounds,
+  initialZoom = 14,
 }) {
   const containerRef = useRef(null);
   const mapRef = useRef(null);
@@ -145,14 +145,11 @@ export default function MapView({
       container: containerRef.current,
       style: makeStyle(themeRef.current),
       center: initialCenter || [-5.9845, 37.3891],
-      zoom: 14,
+      zoom: initialZoom,
       attributionControl: { compact: true },
       maxPitch: 75,
     });
     mapRef.current = map;
-    if (initialBounds) {
-      map.fitBounds(initialBounds, { padding: 30, maxZoom: 15, animate: false });
-    }
 
     const emitMove = () => {
       const b = map.getBounds();
@@ -330,7 +327,10 @@ export default function MapView({
   useEffect(() => {
     const map = mapRef.current;
     if (!map || !readyRef.current || !focus) return;
-    map.flyTo({ center: [focus.lng, focus.lat], zoom: focus.zoom ?? map.getZoom(), speed: 1.2 });
+    const opts = { center: [focus.lng, focus.lat], zoom: focus.zoom ?? map.getZoom() };
+    // En seguimiento usamos easeTo (suave); en saltos puntuales, flyTo.
+    if (focus.ease) map.easeTo({ ...opts, duration: 800 });
+    else map.flyTo({ ...opts, speed: 1.2 });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [focus?.key]);
 

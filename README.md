@@ -63,7 +63,8 @@ src/
   lib/
     nominatim.js        # búsqueda de ciudad y reverse geocoding (Nominatim)
     city.js             # modelo de ciudad + persistencia en localStorage
-    viewport.js         # bbox del viewport (margen 20%) y decisión de recarga
+    viewport.js         # bbox del viewport (margen 20%)
+    tiles.js            # rejilla de tiles ~800 m + carga concurrente (allSettled)
     cluster.js          # índice supercluster + color por mayoría sol/sombra
     overpass.js         # fetch de bares por viewport y edificios (paralelo + caché)
     cache.js            # caché IndexedDB con TTL (idb)
@@ -85,12 +86,20 @@ La app ya no está fijada a Sevilla:
    activa), o usa **tu ubicación** (geolocalización + reverse geocoding). La
    última ciudad se guarda en `localStorage` y al reabrir salta directa al mapa.
    Botón **"Cambiar ciudad"** en la cabecera.
-2. **Carga por viewport** (no por municipio entero): al dejar de mover el mapa
-   (`moveend`, debounce 600 ms) se calcula el bbox visible **+20% de margen**; si
-   aporta **>30% de área nueva** respecto a la última carga, se pide a Overpass
-   solo esa zona y se **fusiona** con los bares ya cargados (dedupe por id OSM).
-   Caché IndexedDB por bbox con **TTL de 1 h**. En memoria se mantienen como
-   mucho **2000 bares** (se descartan los más lejanos al centro del viewport).
+2. **Carga por TILES** (no por municipio entero): el área se trocea en tiles de
+   **~800 m** (`lib/tiles.js`). Al dejar de mover el mapa (`moveend`, debounce
+   500 ms) se calculan los tiles del viewport (∩ ciudad) que aún no están en
+   memoria y se cargan **solo esos**, con **concurrencia 4** y `Promise.allSettled`
+   (un tile que falle no tumba al resto; se reintenta luego). Los bares se
+   **fusionan por id OSM** (dedupe) y se purgan los más lejanos si se superan
+   **3000** en memoria. Cada tile tiene un bbox determinista → se **cachea de
+   forma estable** en IndexedDB (TTL 1 h). Esto resuelve el problema de las
+   ciudades grandes (Madrid, Barcelona): ya no se lanza una consulta gigante que
+   se trunca, sino muchas pequeñas y rápidas.
+
+   La consulta Overpass usa **`nwr`** (nodes + ways + relations) sobre
+   `bar|pub|cafe|restaurant|beer_garden|biergarten|tavern` con `name`, y
+   `out body center qt` (centroide de ways/relations, sin límite fijo).
 3. **Clustering** (`supercluster`, `radius 60`, `maxZoom 16`): los marcadores se
    agrupan; el color del cluster es naranja si >60% están al sol, gris si >60% en
    sombra, amarillo si es mixto. Click en un cluster → `flyTo` con `zoom+2`.
@@ -254,8 +263,9 @@ CLI: `npx vercel` (o `vercel --prod`).
 - **Overpass API** puede ir lenta o limitar peticiones; se consultan **varios
   endpoints en paralelo** y se usa el primero que responde.
 - La meteo de Open-Meteo es **previsión por hora** (~3 días), no observación.
-- Los bares se cargan **por viewport**: para verlos hay que mover/acercar el mapa
-  a la zona de interés (no se descarga la ciudad entera de golpe).
+- Los bares se cargan **por tiles del viewport** (no la ciudad entera de golpe):
+  para ver zonas nuevas hay que mover/acercar el mapa. Por petición se cargan como
+  mucho 16 tiles (los más cercanos al centro); el resto, al hacer pan/zoom.
 - **Nominatim** limita a ~1 req/s. Se respeta con debounce y una sola petición
   activa. Nota: los navegadores **no permiten** fijar la cabecera `User-Agent`
   (la ignoran); Nominatim identifica la app por el `Referer` automático.

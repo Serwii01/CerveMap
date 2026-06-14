@@ -24,15 +24,15 @@ export const SEVILLA = {
 
 function buildBarsQuery(bbox) {
   const [s, w, n, e] = bbox;
-  // Bares, pubs, cafés y restaurantes CON nombre dentro del bbox visible.
-  // `out body center` da coordenadas tanto de nodes como del centroide de ways.
+  // `nwr` = nodes + ways + relations en una sola sentencia (incluye locales
+  // mapeados como polígono o relación, no solo como punto). `out body center qt`
+  // da el centroide de ways/relations y ordena por proximidad, sin límite fijo.
   return `
-    [out:json][timeout:25];
+    [out:json][timeout:30];
     (
-      node["amenity"~"^(bar|pub|cafe|restaurant)$"]["name"](${s},${w},${n},${e});
-      way["amenity"~"^(bar|pub|cafe|restaurant)$"]["name"](${s},${w},${n},${e});
+      nwr["amenity"~"^(bar|pub|cafe|restaurant|beer_garden|biergarten|tavern)$"]["name"](${s},${w},${n},${e});
     );
-    out body center;`;
+    out body center qt;`;
 }
 
 /**
