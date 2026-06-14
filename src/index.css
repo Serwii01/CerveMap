@@ -284,6 +284,123 @@ body {
   margin-top: -2px;
 }
 
+/* ---------- Cerca de mí ---------- */
+.nearme-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 14px;
+  flex-wrap: wrap;
+}
+.nearme-btn {
+  background: var(--accent-2);
+  color: #fff;
+  border: none;
+  border-radius: 999px;
+  padding: 8px 16px;
+  font-size: 13px;
+  font-weight: 700;
+  cursor: pointer;
+}
+.nearme-btn:hover:not(:disabled) {
+  filter: brightness(1.08);
+}
+.nearme-btn:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+.geo-msg {
+  font-size: 12px;
+  text-transform: none;
+  letter-spacing: 0;
+}
+
+/* Punto de ubicación del usuario en el mapa */
+.user-dot {
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: var(--accent-2);
+  border: 3px solid #fff;
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent-2) 40%, transparent);
+}
+
+/* Lista ordenada por cercanía + sol */
+.ranked {
+  list-style: none;
+  margin: 10px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.ranked-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  text-align: left;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 8px 10px;
+  cursor: pointer;
+  color: var(--text);
+}
+.ranked-item:hover {
+  border-color: var(--accent);
+}
+.ranked-dot {
+  width: 11px;
+  height: 11px;
+  border-radius: 50%;
+  flex: 0 0 auto;
+}
+.ranked-main {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+.ranked-name {
+  font-size: 13.5px;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.ranked-meta {
+  font-size: 11px;
+  text-transform: none;
+  letter-spacing: 0;
+}
+
+/* ---------- Filtros ---------- */
+.filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 12px;
+}
+.filter-chip {
+  background: var(--surface-2);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 6px 12px;
+  font-size: 12.5px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.filter-chip:hover {
+  border-color: var(--accent);
+}
+.filter-chip.active {
+  background: var(--accent);
+  color: #1a1206;
+  border-color: var(--accent);
+  font-weight: 700;
+}
+
 /* ---------- Leyenda ---------- */
 .legend {
   display: flex;
@@ -318,6 +435,40 @@ body {
   background: rgba(53, 122, 78, 0.18);
   border: 1px solid rgba(53, 122, 78, 0.4);
 }
+:root[data-theme='light'] .disclaimer.ok {
+  color: #1d5a34;
+}
+
+/* ---------- Estado de datos / recarga ---------- */
+.data-status {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-top: 10px;
+  font-size: 11px;
+}
+.data-status .muted {
+  text-transform: none;
+  letter-spacing: 0;
+}
+.link-btn {
+  background: none;
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: 999px;
+  padding: 4px 10px;
+  font-size: 12px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.link-btn:hover:not(:disabled) {
+  border-color: var(--accent);
+}
+.link-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
 
 /* ---------- Popups ---------- */
 .popup {
@@ -343,8 +494,18 @@ body {
   margin-top: 4px;
   color: #333;
 }
-.popup-terrace {
+.popup-dist {
+  font-size: 12px;
+  margin-top: 4px;
+  color: #2f6df0;
+  font-weight: 600;
+}
+.popup-open {
   margin-top: 6px;
+  color: #555 !important;
+}
+.popup-terrace {
+  margin-top: 3px;
   color: #777 !important;
 }
 .maplibregl-popup-content {
@@ -386,17 +547,57 @@ body {
   }
 }
 
-.count-badge {
+.badges {
   position: absolute;
   top: 58px;
   left: 14px;
   z-index: 550;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+  max-width: calc(100% - 28px);
+}
+.count-badge {
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: 999px;
   padding: 4px 12px;
   font-size: 12px;
   color: var(--muted);
+}
+.count-badge.catastro {
+  color: var(--text);
+  border-color: color-mix(in srgb, var(--accent) 55%, var(--border));
+  background: color-mix(in srgb, var(--accent) 14%, var(--surface));
+  font-weight: 600;
+}
+
+/* ---------- Banner de instalación PWA ---------- */
+.install-banner {
+  position: absolute;
+  z-index: 700;
+  left: 50%;
+  top: 56px;
+  transform: translateX(-50%);
+  width: calc(100% - 28px);
+  max-width: 440px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  box-shadow: var(--shadow);
+  padding: 10px 12px;
+  font-size: 13px;
+}
+.install-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 0 0 auto;
 }
 
 /* ---------- Responsive: pantallas grandes ---------- */

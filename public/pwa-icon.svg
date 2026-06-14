@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="CerveMap">
+  <rect width="512" height="512" fill="#f5a524"/>
+  <g transform="translate(6,10)">
+    <!-- asa -->
+    <rect x="318" y="214" width="96" height="158" rx="48" fill="none" stroke="#ffffff" stroke-width="34"/>
+    <!-- vaso -->
+    <rect x="138" y="168" width="196" height="236" rx="26" fill="#ffffff"/>
+    <!-- cerveza -->
+    <rect x="158" y="238" width="156" height="156" rx="14" fill="#e8951a"/>
+    <!-- espuma -->
+    <g fill="#ffffff">
+      <circle cx="176" cy="182" r="34"/>
+      <circle cx="226" cy="158" r="42"/>
+      <circle cx="284" cy="170" r="36"/>
+      <circle cx="320" cy="196" r="28"/>
+    </g>
+  </g>
+</svg>

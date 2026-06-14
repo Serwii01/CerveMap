@@ -1,6 +1,12 @@
 // Consulta a Overpass API (OpenStreetMap) para obtener bares/pubs.
 // Sin API key. Usamos varios endpoints como fallback por si uno falla.
 
+import { loadHeights, lookupHeight } from './heights.js';
+import { cacheGet, cacheSet, cacheDelete, isFresh, TTL } from './cache.js';
+
+const BARS_KEY = 'bars_sevilla';
+const buildingsKey = (bbox) => `buildings_${bbox.map((v) => v.toFixed(3)).join('_')}`;
+
 const ENDPOINTS = [
   'https://overpass-api.de/api/interpreter',
   'https://overpass.kumi.systems/api/interpreter',
@@ -79,10 +85,17 @@ function normalize(el) {
     name: tags.name || 'Bar sin nombre',
     amenity: tags.amenity,
     outdoorSeating: tags.outdoor_seating, // 'yes' | 'no' | undefined
+    terrace: tags.terrace, // 'yes' | 'no' | undefined
+    openingHours: tags.opening_hours, // expresión OSM (puede faltar)
     address: [tags['addr:street'], tags['addr:housenumber']]
       .filter(Boolean)
       .join(' '),
   };
+}
+
+/** ¿El bar tiene terraza exterior confirmada en OSM? */
+export function hasTerrace(bar) {
+  return bar.outdoorSeating === 'yes' || bar.terrace === 'yes';
 }
 
 function buildBuildingsQuery(bbox) {
@@ -94,38 +107,84 @@ function buildBuildingsQuery(bbox) {
     out geom;`;
 }
 
-/** Parsea altura en metros desde tags de OSM (height / building:levels). */
-function parseHeight(tags) {
+/**
+ * Altura declarada en OSM (height / building:levels), o null si no consta.
+ * Devuelve la fuente para poder priorizar luego el Catastro.
+ */
+function osmHeight(tags) {
   if (tags.height) {
     const h = parseFloat(String(tags.height).replace(',', '.'));
-    if (!Number.isNaN(h) && h > 0) return { height: h, assumed: false };
+    if (!Number.isNaN(h) && h > 0) return h;
   }
   const levels = parseFloat(tags['building:levels']);
-  if (!Number.isNaN(levels) && levels > 0) {
-    return { height: levels * 3, assumed: false };
+  if (!Number.isNaN(levels) && levels > 0) return levels * 3;
+  return null;
+}
+
+/** Centroide aproximado (media de vértices) de un anillo [[lng,lat],...]. */
+function centroidOf(ring) {
+  let sx = 0, sy = 0;
+  for (const [lng, lat] of ring) {
+    sx += lng;
+    sy += lat;
   }
-  // Sin datos: asumimos 3 plantas (~9 m), tipico del centro de Sevilla.
-  return { height: 9, assumed: true };
+  return [sx / ring.length, sy / ring.length];
 }
 
 /**
  * Edificios dentro del bbox con su footprint (lng/lat) y altura estimada.
+ * Prioridad de altura: OSM > Catastro (lookup por coordenada) > 9 m por defecto.
+ * Cada edificio lleva `heightSource`: 'osm' | 'catastro' | 'fallback'.
  * `limit` acota el numero para no saturar el calculo de sombras.
  */
-export async function fetchBuildings(bbox, signal, limit = 4000) {
-  const data = await overpassRace(buildBuildingsQuery(bbox), signal);
+export async function fetchBuildings(bbox, signal, { limit = 4000, force = false } = {}) {
+  const key = buildingsKey(bbox);
+  if (!force) {
+    const rec = await cacheGet(key);
+    if (isFresh(rec, TTL.BUILDINGS)) return rec.value;
+  }
+  // Lanzamos la consulta y la carga del índice del Catastro en paralelo.
+  const [data] = await Promise.all([
+    overpassRace(buildBuildingsQuery(bbox), signal),
+    loadHeights(),
+  ]);
   const out = [];
   for (const el of data.elements || []) {
     if (el.type !== 'way' || !el.geometry || el.geometry.length < 3) continue;
     const ring = el.geometry.map((g) => [g.lon, g.lat]);
-    const { height, assumed } = parseHeight(el.tags || {});
-    out.push({ id: `way/${el.id}`, ring, height, assumed });
+
+    let height = osmHeight(el.tags || {});
+    let heightSource = 'osm';
+    if (height == null) {
+      const [lng, lat] = centroidOf(ring);
+      const cat = lookupHeight(lat, lng);
+      if (cat != null) {
+        height = cat;
+        heightSource = 'catastro';
+      } else {
+        height = 9; // 3 plantas, típico del centro de Sevilla
+        heightSource = 'fallback';
+      }
+    }
+
+    out.push({
+      id: `way/${el.id}`,
+      ring,
+      height,
+      heightSource,
+      assumed: heightSource === 'fallback',
+    });
     if (out.length >= limit) break;
   }
+  await cacheSet(key, out);
   return out;
 }
 
-export async function fetchBars(bbox = SEVILLA.bbox, signal) {
+export async function fetchBars(bbox = SEVILLA.bbox, signal, { force = false } = {}) {
+  if (!force) {
+    const rec = await cacheGet(BARS_KEY);
+    if (isFresh(rec, TTL.BARS)) return rec.value;
+  }
   const data = await overpassRace(buildQuery(bbox), signal);
   const seen = new Set();
   const bars = [];
@@ -135,5 +194,17 @@ export async function fetchBars(bbox = SEVILLA.bbox, signal) {
     seen.add(b.id);
     bars.push(b);
   }
+  await cacheSet(BARS_KEY, bars);
   return bars;
+}
+
+/** Marca de tiempo del caché de bares (para "actualizado hace X"), o null. */
+export async function barsCacheInfo() {
+  const rec = await cacheGet(BARS_KEY);
+  return rec ? { savedAt: rec.savedAt } : null;
+}
+
+/** Borra el caché de bares para forzar una recarga desde Overpass. */
+export async function clearBarsCache() {
+  await cacheDelete(BARS_KEY);
 }

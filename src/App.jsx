@@ -2,7 +2,13 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import MapView from './components/MapView.jsx';
 import TimeControls from './components/TimeControls.jsx';
 import SunCompass from './components/SunCompass.jsx';
-import { fetchBars, fetchBuildings, SEVILLA } from './lib/overpass.js';
+import {
+  fetchBars,
+  fetchBuildings,
+  barsCacheInfo,
+  hasTerrace,
+  SEVILLA,
+} from './lib/overpass.js';
 import {
   fetchWeather,
   weatherAt,
@@ -11,6 +17,8 @@ import {
 } from './lib/weather.js';
 import { getSunPosition, getSunTimes } from './lib/sun.js';
 import { classifyBar, classifyByShadow, CATEGORY_META, CATEGORY } from './lib/classify.js';
+import { openState } from './lib/hours.js';
+import { haversine, distanceText, formatDistance, walkMinutes, rankScore } from './lib/geo.js';
 import {
   makeProjector,
   prepareBuilding,
@@ -25,14 +33,33 @@ const MIN_ZOOM_3D = 15;
 const inBbox = ([lng, lat], [s, w, n, e]) =>
   lat >= s && lat <= n && lng >= w && lng <= e;
 
+/** Texto relativo "hace X" a partir de un timestamp. */
+function formatAgo(ts) {
+  if (!ts) return null;
+  const mins = Math.floor((Date.now() - ts) / 60000);
+  if (mins < 1) return 'hace un momento';
+  if (mins < 60) return `hace ${mins} min`;
+  const h = Math.floor(mins / 60);
+  if (h < 24) return `hace ${h} h`;
+  return `hace ${Math.floor(h / 24)} d`;
+}
+
 export default function App() {
   const [date, setDate] = useState(() => new Date());
   const [bars, setBars] = useState([]);
   const [barsState, setBarsState] = useState('loading');
   const [weather, setWeather] = useState(null);
+  const [barsSavedAt, setBarsSavedAt] = useState(null);
   const [panelOpen, setPanelOpen] = useState(true);
 
   const [mode3d, setMode3d] = useState(false);
+  const [onlyOpen, setOnlyOpen] = useState(false);
+  const [onlyTerrace, setOnlyTerrace] = useState(false);
+  const [userLoc, setUserLoc] = useState(null); // {lat,lng}
+  const [geoState, setGeoState] = useState('idle'); // idle|locating|denied|error
+  const [focus, setFocus] = useState(null); // {lng,lat,zoom,key}
+  const [canInstall, setCanInstall] = useState(false);
+  const installEvent = useRef(null);
   const [theme, setTheme] = useState(
     () => localStorage.getItem('cervemap-theme') || 'light',
   );
@@ -48,24 +75,64 @@ export default function App() {
     localStorage.setItem('cervemap-theme', theme);
   }, [theme]);
 
+  // --- PWA: captura el evento de instalación para el banner "Instalar" ---
+  useEffect(() => {
+    const onPrompt = (e) => {
+      e.preventDefault();
+      installEvent.current = e;
+      if (localStorage.getItem('cervemap-install-dismissed') !== '1') setCanInstall(true);
+    };
+    const onInstalled = () => {
+      setCanInstall(false);
+      installEvent.current = null;
+    };
+    window.addEventListener('beforeinstallprompt', onPrompt);
+    window.addEventListener('appinstalled', onInstalled);
+    return () => {
+      window.removeEventListener('beforeinstallprompt', onPrompt);
+      window.removeEventListener('appinstalled', onInstalled);
+    };
+  }, []);
+
+  const installApp = async () => {
+    const e = installEvent.current;
+    if (!e) return;
+    e.prompt();
+    await e.userChoice;
+    installEvent.current = null;
+    setCanInstall(false);
+  };
+  const dismissInstall = () => {
+    localStorage.setItem('cervemap-install-dismissed', '1');
+    setCanInstall(false);
+  };
+
   const proj = useMemo(() => makeProjector(LAT, LNG), []);
   const sun = useMemo(() => getSunPosition(date, LAT, LNG), [date]);
   const sunTimes = useMemo(() => getSunTimes(date, LAT, LNG), [date]);
 
-  // --- Carga de bares ---
-  useEffect(() => {
+  // --- Carga de bares (con caché IndexedDB; force omite el caché) ---
+  const barsCtrl = useRef(null);
+  const loadBars = useCallback((force = false) => {
+    barsCtrl.current?.abort();
     const ctrl = new AbortController();
+    barsCtrl.current = ctrl;
     setBarsState('loading');
-    fetchBars(SEVILLA.bbox, ctrl.signal)
+    fetchBars(SEVILLA.bbox, ctrl.signal, { force })
       .then((d) => {
         setBars(d);
         setBarsState('ok');
+        barsCacheInfo().then((m) => setBarsSavedAt(m?.savedAt ?? Date.now()));
       })
       .catch((err) => {
         if (err.name !== 'AbortError') setBarsState('error');
       });
-    return () => ctrl.abort();
   }, []);
+
+  useEffect(() => {
+    loadBars(false);
+    return () => barsCtrl.current?.abort();
+  }, [loadBars]);
 
   // --- Carga de meteo ---
   useEffect(() => {
@@ -117,10 +184,17 @@ export default function App() {
   const shadowIndex = useMemo(() => buildShadowIndex(shadows), [shadows]);
 
   const shadowsActive = mode3d && sun.isUp && buildings.length > 0;
-  const assumedCount = useMemo(
-    () => (shadowsActive ? buildings.filter((b) => b.assumed).length : 0),
-    [shadowsActive, buildings],
-  );
+  const heightStats = useMemo(() => {
+    let catastro = 0, osm = 0, fallback = 0;
+    if (shadowsActive) {
+      for (const b of buildings) {
+        if (b.heightSource === 'catastro') catastro++;
+        else if (b.heightSource === 'fallback') fallback++;
+        else osm++;
+      }
+    }
+    return { catastro, osm, fallback };
+  }, [shadowsActive, buildings]);
 
   // --- Evaluacion de cada bar ---
   const evaluated = useMemo(
@@ -131,30 +205,61 @@ export default function App() {
         const ev = useShadow
           ? classifyByShadow(sun, isInAnyShadowIndexed([bar.lng, bar.lat], shadowIndex, proj))
           : classifyBar(sun, bar);
-        return { bar, ev, real: useShadow };
+        return {
+          bar,
+          ev,
+          real: useShadow,
+          open: openState(bar.openingHours, date),
+          terrace: hasTerrace(bar),
+          dist: userLoc ? haversine(userLoc, { lat: bar.lat, lng: bar.lng }) : null,
+        };
       }),
-    [bars, shadowsActive, buildingsBbox, shadowIndex, sun, proj],
+    [bars, shadowsActive, buildingsBbox, shadowIndex, sun, proj, date, userLoc],
   );
+
+  // Lista ordenada por cercanía + sol (solo con ubicación conocida).
+  const ranked = useMemo(() => {
+    if (!userLoc) return [];
+    return evaluated
+      .filter(({ open, terrace }) => {
+        if (onlyOpen && open === 'closed') return false;
+        if (onlyTerrace && !terrace) return false;
+        return true;
+      })
+      .map((e) => ({ ...e, score: rankScore(e.dist ?? Infinity, e.ev.category) }))
+      .sort((a, b) => b.score - a.score)
+      .slice(0, 6);
+  }, [evaluated, userLoc, onlyOpen, onlyTerrace]);
 
   // --- GeoJSON para MapLibre ---
   const barsFC = useMemo(
     () => ({
       type: 'FeatureCollection',
-      features: evaluated.map(({ bar, ev }) => ({
-        type: 'Feature',
-        geometry: { type: 'Point', coordinates: [bar.lng, bar.lat] },
-        properties: {
-          name: bar.name,
-          address: bar.address || '',
-          terrace: bar.outdoorSeating || '',
-          color: ev.color,
-          emoji: ev.emoji,
-          label: ev.label,
-          note: ev.note,
-        },
-      })),
+      features: evaluated
+        // "Solo abiertos" oculta los confirmados cerrados (los de horario
+        // desconocido se mantienen porque no se puede afirmar que estén cerrados).
+        .filter(({ open, terrace }) => {
+          if (onlyOpen && open === 'closed') return false;
+          if (onlyTerrace && !terrace) return false;
+          return true;
+        })
+        .map(({ bar, ev, open, terrace, dist }) => ({
+          type: 'Feature',
+          geometry: { type: 'Point', coordinates: [bar.lng, bar.lat] },
+          properties: {
+            name: bar.name,
+            address: bar.address || '',
+            terrace: terrace ? 'yes' : bar.outdoorSeating === 'no' ? 'no' : '',
+            open,
+            dist: dist != null ? distanceText(dist) : '',
+            color: ev.color,
+            emoji: ev.emoji,
+            label: ev.label,
+            note: ev.note,
+          },
+        })),
     }),
-    [evaluated],
+    [evaluated, onlyOpen, onlyTerrace],
   );
 
   const shadowFC = useMemo(
@@ -186,19 +291,34 @@ export default function App() {
 
   const onMoveEnd = useCallback((v) => setView(v), []);
 
+  const focusKey = useRef(0);
+  const locateMe = useCallback(() => {
+    if (!navigator.geolocation) {
+      setGeoState('error');
+      return;
+    }
+    setGeoState('locating');
+    navigator.geolocation.getCurrentPosition(
+      (pos) => {
+        const loc = { lat: pos.coords.latitude, lng: pos.coords.longitude };
+        setUserLoc(loc);
+        setGeoState('idle');
+        setFocus({ lng: loc.lng, lat: loc.lat, zoom: 15, key: ++focusKey.current });
+      },
+      () => setGeoState('denied'),
+      { enableHighAccuracy: true, timeout: 10000 },
+    );
+  }, []);
+
+  const focusBar = useCallback((bar) => {
+    setFocus({ lng: bar.lng, lat: bar.lat, zoom: 17, key: ++focusKey.current });
+  }, []);
+
   const wx = useMemo(() => (weather ? weatherAt(weather, date) : null), [weather, date]);
   const fmt = (d) =>
     d ? d.toLocaleTimeString('es-ES', { hour: '2-digit', minute: '2-digit' }) : '--:--';
 
-  const retry = () => {
-    setBarsState('loading');
-    fetchBars(SEVILLA.bbox)
-      .then((d) => {
-        setBars(d);
-        setBarsState('ok');
-      })
-      .catch(() => setBarsState('error'));
-  };
+  const dataAgo = formatAgo(barsSavedAt);
 
   const zoomLow = mode3d && view && view.zoom < MIN_ZOOM_3D;
   const visibleMeta = mode3d
@@ -215,7 +335,25 @@ export default function App() {
         theme={theme}
         sun={sun}
         onMoveEnd={onMoveEnd}
+        focus={focus}
+        userLoc={userLoc}
       />
+
+      {canInstall && (
+        <div className="install-banner" role="dialog" aria-label="Instalar CerveMap">
+          <span>
+            📲 Instala <strong>CerveMap</strong> para abrirla como una app
+          </span>
+          <div className="install-actions">
+            <button className="now-btn" type="button" onClick={installApp}>
+              Instalar
+            </button>
+            <button className="link-btn" type="button" onClick={dismissInstall}>
+              Ahora no
+            </button>
+          </div>
+        </div>
+      )}
 
       <header className="topbar">
         <h1>
@@ -287,6 +425,67 @@ export default function App() {
 
         <TimeControls date={date} onChange={setDate} />
 
+        <div className="nearme-row">
+          <button
+            type="button"
+            className="nearme-btn"
+            onClick={locateMe}
+            disabled={geoState === 'locating'}
+          >
+            {geoState === 'locating' ? '📍 Localizando…' : 'Cerca de mí ☀️'}
+          </button>
+          {geoState === 'denied' && (
+            <span className="muted geo-msg">Permiso de ubicación denegado</span>
+          )}
+          {geoState === 'error' && (
+            <span className="muted geo-msg">Geolocalización no disponible</span>
+          )}
+        </div>
+
+        {ranked.length > 0 && (
+          <ul className="ranked">
+            {ranked.map(({ bar, ev, open, dist }) => (
+              <li key={bar.id}>
+                <button type="button" className="ranked-item" onClick={() => focusBar(bar)}>
+                  <span className="ranked-dot" style={{ background: ev.color }} />
+                  <span className="ranked-main">
+                    <span className="ranked-name">
+                      {bar.name}
+                      {open === 'open' && ' 🟢'}
+                      {open === 'closed' && ' 🔴'}
+                    </span>
+                    <span className="ranked-meta muted">
+                      {ev.emoji} {ev.label}
+                      {dist != null && ` · ${formatDistance(dist)} · ${walkMinutes(dist)} min`}
+                    </span>
+                  </span>
+                </button>
+              </li>
+            ))}
+          </ul>
+        )}
+
+        <div className="filters">
+          <button
+            type="button"
+            className={`filter-chip ${onlyOpen ? 'active' : ''}`}
+            aria-pressed={onlyOpen}
+            onClick={() => setOnlyOpen((v) => !v)}
+            title="Oculta los bares confirmados como cerrados a la hora elegida"
+          >
+            🕒 Solo abiertos ahora
+          </button>
+          <button
+            type="button"
+            className={`filter-chip ${onlyTerrace ? 'active' : ''}`}
+            aria-pressed={onlyTerrace}
+            onClick={() => setOnlyTerrace((v) => !v)}
+            title="Solo bares con terraza exterior confirmada en OSM"
+          >
+            ☂️ Con terraza
+          </button>
+        </div>
+
         <div className="legend">
           {visibleMeta.map((m) => (
             <span className="legend-item" key={m.label}>
@@ -299,9 +498,14 @@ export default function App() {
         {shadowsActive ? (
           <p className="disclaimer ok">
             ✅ <strong>Sombras reales</strong> calculadas con la geometría y altura
-            de {buildings.length} edificios de OSM para esta hora.
-            {assumedCount > 0 &&
-              ` ${assumedCount} no declaran altura: se asume ~9 m (3 plantas).`}{' '}
+            de {buildings.length} edificios para esta hora.{' '}
+            {heightStats.osm} con altura de OSM
+            {heightStats.catastro > 0 && (
+              <>
+                , <strong>{heightStats.catastro} con altura real del Catastro</strong>
+              </>
+            )}
+            {heightStats.fallback > 0 && `, ${heightStats.fallback} estimados en ~9 m`}.
             Aproximación geométrica (no considera salientes ni vegetación).
           </p>
         ) : mode3d ? (
@@ -324,6 +528,24 @@ export default function App() {
             sombras</strong> para el cálculo geométrico con edificios.
           </p>
         )}
+
+        <div className="data-status">
+          <span className="muted">
+            {barsState === 'loading'
+              ? 'Actualizando datos del mapa…'
+              : dataAgo
+                ? `Datos del mapa actualizados ${dataAgo}`
+                : 'Datos del mapa en caché local'}
+          </span>
+          <button
+            className="link-btn"
+            type="button"
+            onClick={() => loadBars(true)}
+            disabled={barsState === 'loading'}
+          >
+            ↻ Recargar
+          </button>
+        </div>
       </section>
 
       {/* Overlays de estado */}
@@ -336,7 +558,7 @@ export default function App() {
       {barsState === 'error' && (
         <div className="overlay">
           <p>No se pudieron cargar los bares (Overpass).</p>
-          <button className="now-btn" onClick={retry} type="button">
+          <button className="now-btn" onClick={() => loadBars(false)} type="button">
             Reintentar
           </button>
         </div>
@@ -348,10 +570,17 @@ export default function App() {
       )}
 
       {barsState === 'ok' && bars.length > 0 && (
-        <div className="count-badge">
-          {bars.length} bares
-          {mode3d && buildingsState === 'loading' && ' · cargando edificios…'}
-          {shadowsActive && ` · ${shadows.length} sombras`}
+        <div className="badges">
+          <div className="count-badge">
+            {bars.length} bares
+            {mode3d && buildingsState === 'loading' && ' · cargando edificios…'}
+            {shadowsActive && ` · ${shadows.length} sombras`}
+          </div>
+          {heightStats.catastro > 0 && (
+            <div className="count-badge catastro" title="Alturas reales del Catastro español">
+              🏛️ {heightStats.catastro} con altura real del Catastro
+            </div>
+          )}
         </div>
       )}
     </div>

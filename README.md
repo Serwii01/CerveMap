@@ -22,7 +22,11 @@ una **vista 3D con la sombra REAL proyectada por los edificios**.
 | Sombras | **Geometría propia** (`lib/geometry.js`) | Proyección real de sombras sin dependencias externas. |
 | Meteo | **Open-Meteo** | Temperatura, nubosidad y código de cielo por hora, **sin API key**. |
 | Bares y edificios | **Overpass API (OSM)** | Datos abiertos, sin backend ni clave. |
-| Estilos | **CSS plano + variables** | Modo oscuro y responsive sin peso extra. |
+| Alturas reales | **Catastro (INSPIRE) → índice estático** | Altura real de edificios sin OSM `height`. Se procesa offline. |
+| Caché | **IndexedDB (`idb`)** | Bares y edificios cacheados (24 h / 72 h) para carga instantánea. |
+| Horarios | **`opening_hours`** | "Abierto ahora" parseado en cliente. |
+| PWA | **`vite-plugin-pwa`** | Instalable y con assets cacheados offline. |
+| Estilos | **CSS plano + variables** | Modo claro/oscuro y responsive sin peso extra. |
 
 **Por qué este stack:** es el camino más simple y sólido para desplegar en
 Vercel sin servidor. MapLibre aporta el 3D y la extrusión de edificios con WebGL
@@ -36,20 +40,29 @@ sobreingeniería.
 
 ```
 index.html
+public/
+  data/seville-heights.json   # índice estático de alturas del Catastro (regenerable)
+  pwa-icon.svg                # icono de la PWA
+scripts/
+  build-heights.mjs           # procesa el GML del Catastro -> seville-heights.json
 src/
   main.jsx              # punto de entrada
-  App.jsx               # estado (hora, bares, edificios, sombras, meteo) + UI
-  index.css             # tema oscuro, mobile-first, responsive
+  App.jsx               # estado (hora, bares, edificios, sombras, meteo, filtros, geo) + UI
+  index.css             # tema claro/oscuro, mobile-first, responsive
   components/
     MapView.jsx         # MapLibre: base, extrusión 3D, capa de sombras, bares, popups
     TimeControls.jsx    # slider de hora, fecha y botón "Ahora"
     SunCompass.jsx      # brújula SVG con azimut y elevación
   lib/
-    overpass.js         # fetch de bares y de edificios (con fallback de endpoints)
+    overpass.js         # fetch de bares y edificios (endpoints en paralelo + caché)
+    cache.js            # caché IndexedDB con TTL (idb)
+    heights.js          # lookup de alturas reales del Catastro
+    hours.js            # estado "abierto ahora" (opening_hours)
+    geo.js              # distancia haversine y score cercanía+sol
     weather.js          # fetch + parseo de Open-Meteo
     sun.js              # posición solar (SunCalc) y utilidades
     classify.js         # heurística (2D) + clasificación por sombra real
-    geometry.js         # proyección de sombras y tests punto/polígono
+    geometry.js         # proyección de sombras, índice espacial y tests
 ```
 
 Flujo: `App` mantiene la **hora seleccionada** y recalcula la posición solar y la
@@ -99,6 +112,50 @@ ese valor por defecto.
 - **⛅ Mixto** · solo en modo 2D, cuando la heurística no es concluyente.
 
 ---
+
+## 🏛️ Alturas reales del Catastro (precisión de sombras)
+
+El mayor problema de precisión es que muchos edificios de OSM no declaran altura.
+CerveMap usa un **índice estático de alturas del Catastro español** (INSPIRE
+Buildings) como fuente de respaldo. Prioridad de altura por edificio:
+
+1. `height` o `building:levels` de **OSM** → `heightSource: 'osm'`.
+2. **Catastro** (lookup por coordenada en el índice) → `heightSource: 'catastro'`.
+3. Si no hay dato, **9 m** por defecto → `heightSource: 'fallback'`.
+
+La UI muestra cuántos edificios usan altura real del Catastro.
+
+### Regenerar el índice de alturas
+
+El repo incluye un `public/data/seville-heights.json` **vacío** (la app funciona
+sin él, con el fallback de 9 m). Para poblarlo con datos reales:
+
+```bash
+# 1. Descarga el GML de edificios de Sevilla (municipio 41091) del feed INSPIRE:
+#    https://www.catastro.hacienda.gob.es/INSPIRE/buildings/ES.SDGC.BU.atom.xml
+#    Descomprime el .zip -> A.ES.SDGC.BU.41091.building.gml
+#
+# 2. Genera el índice (grid ~50 m, altura = nº plantas × 3 m):
+node scripts/build-heights.mjs ruta/al/A.ES.SDGC.BU.41091.building.gml
+```
+
+El script reproyecta de ETRS89/UTM (EPSG:25830) a WGS84 con `proj4` y escribe el
+grid. Es un proceso **manual y offline**: el GML es grande y NO se versiona; el
+resultado (`seville-heights.json`) sí se sirve como asset estático.
+
+## ⚙️ Otras funciones
+
+- **Caché IndexedDB:** los bares (24 h) y los edificios por zona (72 h) se
+  cachean en el navegador. La segunda visita carga al instante; el panel indica
+  "actualizado hace X" con botón **↻ Recargar**.
+- **Abierto ahora:** el campo `opening_hours` de OSM se evalúa con la librería
+  `opening_hours` a la hora del slider. Toggle "Solo abiertos ahora"; los bares
+  confirmados cerrados se atenúan en el mapa.
+- **Con terraza:** filtra por `outdoor_seating=yes` / `terrace=yes`.
+- **Cerca de mí ☀️:** geolocaliza, centra el mapa y ordena una lista por
+  **distancia (40 %) + sol (60 %)**, con distancia y minutos andando en el popup.
+- **PWA:** instalable (`vite-plugin-pwa`), con assets y teselas base cacheados
+  para uso offline. Aparece un banner "Instalar" en navegadores compatibles.
 
 ## Ejecutar en local
 
@@ -152,7 +209,12 @@ CLI: `npx vercel` (o `vercel --prod`).
   `building:levels`; ahí se asume ~9 m, lo que puede sobre/infraestimar la sombra.
 - **Solo edificios del área visible** (a partir de cierto zoom) para no saturar
   el cálculo; los bares fuera de esa área usan la heurística 2D.
-- **Completitud de OSM:** bares o edificios sin etiquetar no aparecen.
+- **Completitud de OSM:** bares o edificios sin etiquetar no aparecen. El estado
+  "abierto ahora" solo se puede calcular si el bar declara `opening_hours`; si no,
+  se muestra "horario sin datos" y no se oculta al filtrar.
+- **Alturas del Catastro:** se estiman como nº de plantas × 3 m (el Catastro no
+  publica altura métrica generalizada). El índice versionado va vacío: regéneralo
+  para activar las alturas reales (ver sección del Catastro).
 - **Overpass API** puede ir lenta o limitar peticiones; se consultan **varios
   endpoints en paralelo** y se usa el primero que responde.
 - La meteo de Open-Meteo es **previsión por hora** (~3 días), no observación.
@@ -163,10 +225,8 @@ CLI: `npx vercel` (o `vercel --prod`).
 
 - Unión exacta de polígonos de sombra (footprints cóncavos, edificios en L).
 - Sombras GPU con deck.gl `SunLight` para mayor realismo visual.
-- Filtros: solo terrazas, solo al sol ahora, abiertos ahora.
-- Geolocalización y orden de bares por cercanía + sol.
-- Otras ciudades con búsqueda de bounding box.
-- PWA/offline y caché de consultas Overpass.
+- Otras ciudades con búsqueda de bounding box y su propio índice del Catastro.
+- Carga diferida (`import()`) de `opening_hours` para aligerar el primer pintado.
 - Ampliar la batería de tests (parseos de API, casos límite).
 
 ---

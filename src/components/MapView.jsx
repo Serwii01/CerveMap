@@ -56,12 +56,20 @@ function popupHTML(p) {
       : p.terrace === 'no'
         ? 'Terraza: no (OSM)'
         : 'Terraza: sin datos';
+  const open =
+    p.open === 'open'
+      ? '🟢 Abierto ahora'
+      : p.open === 'closed'
+        ? '🔴 Cerrado ahora'
+        : '⚪ Horario sin datos';
   return `
     <div class="popup">
       <strong class="popup-name">${p.name}</strong>
       ${p.address ? `<div class="popup-addr">${p.address}</div>` : ''}
       <div class="popup-eval" style="color:${p.color}">${p.emoji} ${p.label}</div>
       <div class="popup-note">${p.note}</div>
+      ${p.dist ? `<div class="popup-dist">📍 ${p.dist}</div>` : ''}
+      <div class="popup-open muted">${open}</div>
       <div class="popup-terrace muted">${terrace}</div>
     </div>`;
 }
@@ -80,7 +88,17 @@ function sunLight(sun) {
   };
 }
 
-export default function MapView({ barsFC, shadowFC, buildingsFC, mode3d, theme, sun, onMoveEnd }) {
+export default function MapView({
+  barsFC,
+  shadowFC,
+  buildingsFC,
+  mode3d,
+  theme,
+  sun,
+  onMoveEnd,
+  focus,
+  userLoc,
+}) {
   const containerRef = useRef(null);
   const mapRef = useRef(null);
   const readyRef = useRef(false);
@@ -167,6 +185,9 @@ export default function MapView({ barsFC, shadowFC, buildingsFC, mode3d, theme, 
           'circle-radius': ['interpolate', ['linear'], ['zoom'], 12, 3, 16, 7, 19, 11],
           'circle-stroke-width': 1.5,
           'circle-stroke-color': t.barStroke,
+          // Los bares confirmados cerrados se atenúan.
+          'circle-opacity': ['case', ['==', ['get', 'open'], 'closed'], 0.3, 0.95],
+          'circle-stroke-opacity': ['case', ['==', ['get', 'open'], 'closed'], 0.3, 1],
         },
       });
 
@@ -230,6 +251,32 @@ export default function MapView({ barsFC, shadowFC, buildingsFC, mode3d, theme, 
     map.setPaintProperty('buildings', 'fill-extrusion-color', t.building);
     map.setPaintProperty('bars', 'circle-stroke-color', t.barStroke);
   }, [theme]);
+
+  // Vuela a un punto cuando cambia `focus` (mi ubicación o un bar de la lista).
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !readyRef.current || !focus) return;
+    map.flyTo({ center: [focus.lng, focus.lat], zoom: focus.zoom ?? map.getZoom(), speed: 1.2 });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [focus?.key]);
+
+  // Marcador de la posición del usuario.
+  const userMarkerRef = useRef(null);
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !readyRef.current) return;
+    if (!userLoc) {
+      userMarkerRef.current?.remove();
+      userMarkerRef.current = null;
+      return;
+    }
+    if (!userMarkerRef.current) {
+      const el = document.createElement('div');
+      el.className = 'user-dot';
+      userMarkerRef.current = new maplibregl.Marker({ element: el });
+    }
+    userMarkerRef.current.setLngLat([userLoc.lng, userLoc.lat]).addTo(map);
+  }, [userLoc]);
 
   return <div ref={containerRef} className="map" />;
 }
