@@ -77,6 +77,17 @@ function bbox(ring) {
 }
 
 /**
+ * Precalcula lo que NO depende del sol: footprint en metros y su envolvente
+ * convexa. Se hace una sola vez al cargar los edificios, no en cada movimiento
+ * del slider de hora. buildShadow reutiliza `footHull` (ya minimo) en lugar de
+ * reproyectar y rehullar el anillo completo cada vez.
+ */
+export function prepareBuilding(b, proj) {
+  const footM = b.ring.map(proj.toM);
+  return { height: b.height, assumed: b.assumed, footHull: convexHull(footM) };
+}
+
+/**
  * Construye el poligono de sombra de un edificio.
  * @returns {{ringLngLat, hullM, bboxM}|null} null si el sol esta bajo el horizonte.
  */
@@ -90,9 +101,10 @@ export function buildShadow(building, sun, proj, maxLen = 250) {
   const sx = -Math.sin(sun.azimuthDeg * DEG) * L; // este
   const sy = -Math.cos(sun.azimuthDeg * DEG) * L; // norte
 
-  const footM = building.ring.map(proj.toM);
-  const transM = footM.map(([x, y]) => [x + sx, y + sy]);
-  const hullM = convexHull(footM.concat(transM));
+  // hull(A ∪ A+v) = hull(hull(A) ∪ hull(A)+v): partimos del hull precalculado.
+  const base = building.footHull || convexHull(building.ring.map(proj.toM));
+  const transM = base.map(([x, y]) => [x + sx, y + sy]);
+  const hullM = convexHull(base.concat(transM));
   if (hullM.length < 3) return null;
 
   const ringLngLat = hullM.map(proj.toLngLat);
@@ -105,7 +117,45 @@ export function buildShadow(building, sun, proj, maxLen = 250) {
   };
 }
 
-/** ¿Esta el punto (lng,lat) dentro de la sombra de algun edificio? */
+/**
+ * Indice espacial (grid uniforme) sobre las sombras para consultar punto-en-sombra
+ * en O(candidatos de la celda) en vez de O(numero de sombras). Cada sombra se
+ * inscribe en todas las celdas que toca su bounding box.
+ */
+export function buildShadowIndex(shadows, cell = 80) {
+  const grid = new Map();
+  for (let i = 0; i < shadows.length; i++) {
+    const [minX, minY, maxX, maxY] = shadows[i].bboxM;
+    const x0 = Math.floor(minX / cell), x1 = Math.floor(maxX / cell);
+    const y0 = Math.floor(minY / cell), y1 = Math.floor(maxY / cell);
+    for (let cx = x0; cx <= x1; cx++) {
+      for (let cy = y0; cy <= y1; cy++) {
+        const k = cx + ':' + cy;
+        const arr = grid.get(k);
+        if (arr) arr.push(i);
+        else grid.set(k, [i]);
+      }
+    }
+  }
+  return { grid, cell, shadows };
+}
+
+/** ¿Esta el punto (lng,lat) dentro de alguna sombra? (usando el indice). */
+export function isInAnyShadowIndexed(lngLat, index, proj) {
+  const [px, py] = proj.toM(lngLat);
+  const cands = index.grid.get(Math.floor(px / index.cell) + ':' + Math.floor(py / index.cell));
+  if (!cands) return false;
+  const { shadows } = index;
+  for (const i of cands) {
+    const s = shadows[i];
+    const [minX, minY, maxX, maxY] = s.bboxM;
+    if (px < minX || px > maxX || py < minY || py > maxY) continue;
+    if (pointInPolygon([px, py], s.hullM)) return true;
+  }
+  return false;
+}
+
+/** Version lineal (sin indice). Se mantiene para tests. */
 export function isInAnyShadow(lngLat, shadows, proj) {
   const [px, py] = proj.toM(lngLat);
   for (const s of shadows) {

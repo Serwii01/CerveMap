@@ -7,10 +7,12 @@ const ENDPOINTS = [
   'https://maps.mail.ru/osm/tools/overpass/api/interpreter',
 ];
 
-// Bounding box aproximado de Sevilla ciudad: S, O, N, E
+// Bounding box de Sevilla municipio: S, O, N, E.
+// Ampliado para cubrir todos los barrios (Sevilla Este, Bellavista, Macarena,
+// Triana/Los Remedios, San Jeronimo...) que antes quedaban recortados.
 export const SEVILLA = {
   center: [37.3891, -5.9845],
-  bbox: [37.32, -6.04, 37.45, -5.92],
+  bbox: [37.30, -6.06, 37.46, -5.88],
 };
 
 function buildQuery(bbox) {
@@ -23,6 +25,46 @@ function buildQuery(bbox) {
       way["amenity"~"^(bar|pub|biergarten)$"](${s},${w},${n},${e});
     );
     out center tags;`;
+}
+
+/**
+ * Lanza la consulta a TODOS los endpoints a la vez y usa el primero que
+ * responde (Promise.any). Cancela los perdedores. Asi la latencia es la del
+ * servidor mas rapido en cada momento, no la suma de timeouts en serie.
+ */
+async function overpassRace(query, signal) {
+  const body = 'data=' + encodeURIComponent(query);
+  const ctrls = ENDPOINTS.map(() => new AbortController());
+  const abortAll = () => ctrls.forEach((c) => c.abort());
+
+  if (signal) {
+    if (signal.aborted) abortAll();
+    else signal.addEventListener('abort', abortAll, { once: true });
+  }
+
+  const one = async (url, ctrl) => {
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body,
+      signal: ctrl.signal,
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    return res.json();
+  };
+
+  try {
+    const data = await Promise.any(ENDPOINTS.map((url, i) => one(url, ctrls[i])));
+    abortAll(); // cancela las peticiones perdedoras
+    return data;
+  } catch (err) {
+    if (signal?.aborted) {
+      const e = new Error('Aborted');
+      e.name = 'AbortError';
+      throw e;
+    }
+    throw new Error('No se pudo conectar con Overpass.');
+  }
 }
 
 function normalize(el) {
@@ -71,61 +113,27 @@ function parseHeight(tags) {
  * `limit` acota el numero para no saturar el calculo de sombras.
  */
 export async function fetchBuildings(bbox, signal, limit = 4000) {
-  const body = 'data=' + encodeURIComponent(buildBuildingsQuery(bbox));
-  let lastError;
-
-  for (const url of ENDPOINTS) {
-    try {
-      const res = await fetch(url, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-        body,
-        signal,
-      });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const data = await res.json();
-      const out = [];
-      for (const el of data.elements || []) {
-        if (el.type !== 'way' || !el.geometry || el.geometry.length < 3) continue;
-        const ring = el.geometry.map((g) => [g.lon, g.lat]);
-        const { height, assumed } = parseHeight(el.tags || {});
-        out.push({ id: `way/${el.id}`, ring, height, assumed });
-        if (out.length >= limit) break;
-      }
-      return out;
-    } catch (err) {
-      if (err.name === 'AbortError') throw err;
-      lastError = err;
-    }
+  const data = await overpassRace(buildBuildingsQuery(bbox), signal);
+  const out = [];
+  for (const el of data.elements || []) {
+    if (el.type !== 'way' || !el.geometry || el.geometry.length < 3) continue;
+    const ring = el.geometry.map((g) => [g.lon, g.lat]);
+    const { height, assumed } = parseHeight(el.tags || {});
+    out.push({ id: `way/${el.id}`, ring, height, assumed });
+    if (out.length >= limit) break;
   }
-  throw lastError || new Error('No se pudieron cargar los edificios.');
+  return out;
 }
 
 export async function fetchBars(bbox = SEVILLA.bbox, signal) {
-  const body = 'data=' + encodeURIComponent(buildQuery(bbox));
-  let lastError;
-
-  for (const url of ENDPOINTS) {
-    try {
-      const res = await fetch(url, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-        body,
-        signal,
-      });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const data = await res.json();
-      const bars = (data.elements || [])
-        .map(normalize)
-        .filter(Boolean)
-        // Evita duplicados por id.
-        .filter((b, i, arr) => arr.findIndex((x) => x.id === b.id) === i);
-      return bars;
-    } catch (err) {
-      if (err.name === 'AbortError') throw err;
-      lastError = err;
-      // Probar siguiente endpoint.
-    }
+  const data = await overpassRace(buildQuery(bbox), signal);
+  const seen = new Set();
+  const bars = [];
+  for (const el of data.elements || []) {
+    const b = normalize(el);
+    if (!b || seen.has(b.id)) continue;
+    seen.add(b.id);
+    bars.push(b);
   }
-  throw lastError || new Error('No se pudo conectar con Overpass.');
+  return bars;
 }

@@ -11,7 +11,13 @@ import {
 } from './lib/weather.js';
 import { getSunPosition, getSunTimes } from './lib/sun.js';
 import { classifyBar, classifyByShadow, CATEGORY_META, CATEGORY } from './lib/classify.js';
-import { makeProjector, buildShadow, isInAnyShadow } from './lib/geometry.js';
+import {
+  makeProjector,
+  prepareBuilding,
+  buildShadow,
+  buildShadowIndex,
+  isInAnyShadowIndexed,
+} from './lib/geometry.js';
 
 const [LAT, LNG] = SEVILLA.center;
 const MIN_ZOOM_3D = 15;
@@ -90,16 +96,25 @@ export default function App() {
     return () => ctrl.abort();
   }, [mode3d, view]);
 
+  // Precomputo independiente del sol (proyeccion + envolvente): solo al cargar.
+  const preparedBuildings = useMemo(
+    () => buildings.map((b) => prepareBuilding(b, proj)),
+    [buildings, proj],
+  );
+
   // --- Sombras reales (geometria) ---
   const shadows = useMemo(() => {
-    if (!mode3d || !sun.isUp || !buildings.length) return [];
+    if (!mode3d || !sun.isUp || !preparedBuildings.length) return [];
     const out = [];
-    for (const b of buildings) {
+    for (const b of preparedBuildings) {
       const s = buildShadow(b, sun, proj);
       if (s) out.push(s);
     }
     return out;
-  }, [mode3d, sun, buildings, proj]);
+  }, [mode3d, sun, preparedBuildings, proj]);
+
+  // Indice espacial para el test bar-en-sombra.
+  const shadowIndex = useMemo(() => buildShadowIndex(shadows), [shadows]);
 
   const shadowsActive = mode3d && sun.isUp && buildings.length > 0;
   const assumedCount = useMemo(
@@ -114,11 +129,11 @@ export default function App() {
         const useShadow =
           shadowsActive && buildingsBbox && inBbox([bar.lng, bar.lat], buildingsBbox);
         const ev = useShadow
-          ? classifyByShadow(sun, isInAnyShadow([bar.lng, bar.lat], shadows, proj))
+          ? classifyByShadow(sun, isInAnyShadowIndexed([bar.lng, bar.lat], shadowIndex, proj))
           : classifyBar(sun, bar);
         return { bar, ev, real: useShadow };
       }),
-    [bars, shadowsActive, buildingsBbox, shadows, sun, proj],
+    [bars, shadowsActive, buildingsBbox, shadowIndex, sun, proj],
   );
 
   // --- GeoJSON para MapLibre ---

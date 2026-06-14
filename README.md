@@ -79,6 +79,14 @@ escala de ciudad y **sin librerías externas**. Las sombras se dibujan como una
 capa semitransparente sobre el suelo y, con la cámara inclinada, se ven bajo los
 edificios extruidos.
 
+**Optimizaciones de rendimiento:** la proyección y la envolvente convexa de cada
+footprint se **precalculan una sola vez** al cargar los edificios (no en cada
+movimiento del slider de hora), aprovechando que `hull(A ∪ A+v) = hull(hull(A) ∪
+hull(A)+v)`. Para saber si un bar está en sombra se usa un **índice espacial
+(grid uniforme)**, que reduce el coste de O(nº de sombras) por bar a O(candidatos
+de la celda). Así mover la hora recalcula las sombras de miles de edificios al
+instante.
+
 **La altura** sale de OSM: `height` o `building:levels × 3 m`. Si un edificio no
 declara altura, se asume ~9 m (3 plantas) y la UI indica cuántos edificios usan
 ese valor por defecto.
@@ -145,10 +153,11 @@ CLI: `npx vercel` (o `vercel --prod`).
 - **Solo edificios del área visible** (a partir de cierto zoom) para no saturar
   el cálculo; los bares fuera de esa área usan la heurística 2D.
 - **Completitud de OSM:** bares o edificios sin etiquetar no aparecen.
-- **Overpass API** puede ir lenta o limitar peticiones; se reintenta con varios
-  endpoints.
+- **Overpass API** puede ir lenta o limitar peticiones; se consultan **varios
+  endpoints en paralelo** y se usa el primero que responde.
 - La meteo de Open-Meteo es **previsión por hora** (~3 días), no observación.
-- El bounding box de bares está fijado a la ciudad de Sevilla.
+- El bounding box de bares cubre todo el municipio de Sevilla (incluido Sevilla
+  Este, Bellavista, Macarena, San Jerónimo, Triana/Los Remedios…).
 
 ## Mejoras futuras
 

@@ -1,4 +1,11 @@
-import { makeProjector, buildShadow, isInAnyShadow } from './src/lib/geometry.js';
+import {
+  makeProjector,
+  prepareBuilding,
+  buildShadow,
+  buildShadowIndex,
+  isInAnyShadow,
+  isInAnyShadowIndexed,
+} from './src/lib/geometry.js';
 
 const proj = makeProjector(37.389, -5.984);
 const M = (x, y) => proj.toLngLat([x, y]); // metros -> lng/lat
@@ -61,6 +68,23 @@ const check = (name, cond) => {
   const sun = { isUp: false, azimuthDeg: 90, altitudeDeg: -5 };
   console.log('Sol bajo el horizonte:');
   check('buildShadow devuelve null', buildShadow(building, sun, proj) === null);
+}
+
+// Camino optimizado: prepareBuilding + indice espacial deben coincidir con el lineal.
+{
+  const sun = { isUp: true, azimuthDeg: 90, altitudeDeg: 30 };
+  const prepared = prepareBuilding(building, proj);
+  const sh = [buildShadow(prepared, sun, proj)];
+  const idx = buildShadowIndex(sh);
+  console.log('Indice espacial vs lineal (sol ESTE 30°):');
+  const pts = [M(-20, 0), M(20, 0), M(-30, 5), M(50, 0), M(0, 0)];
+  let same = true;
+  for (const pt of pts) {
+    if (isInAnyShadowIndexed(pt, idx, proj) !== isInAnyShadow(pt, sh, proj)) same = false;
+  }
+  check('mismo resultado que el test lineal en varios puntos', same);
+  check('punto al OESTE en sombra (indexado)', isInAnyShadowIndexed(M(-20, 0), idx, proj));
+  check('punto lejano fuera de toda celda (indexado)', !isInAnyShadowIndexed(M(500, 500), idx, proj));
 }
 
 console.log(`\n=== ${pass} OK, ${fail} FAIL ===`);
