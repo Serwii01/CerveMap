@@ -29,6 +29,18 @@ export function distanceText(meters) {
   return `${formatDistance(meters)} · ${walkMinutes(meters)} min andando`;
 }
 
+/** Anillo (cerrado) que aproxima un círculo de `meters` alrededor de lat/lng. */
+export function circlePolygon(lat, lng, meters, steps = 48) {
+  const dLat = meters / 111320;
+  const dLng = meters / (111320 * Math.cos((lat * Math.PI) / 180));
+  const coords = [];
+  for (let i = 0; i <= steps; i++) {
+    const a = (i / steps) * 2 * Math.PI;
+    coords.push([lng + dLng * Math.cos(a), lat + dLat * Math.sin(a)]);
+  }
+  return coords;
+}
+
 // Puntuación de sol/sombra por categoría (1 = mejor para tomar el sol).
 const SUN_SCORE = { sol: 1, mixto: 0.5, sombra: 0.15, noche: 0 };
 

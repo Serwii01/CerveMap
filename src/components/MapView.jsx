@@ -1,6 +1,7 @@
 import { useEffect, useRef } from 'react';
 import maplibregl from 'maplibre-gl';
-import { SEVILLA } from '../lib/overpass.js';
+import { buildClusterIndex, queryClusters } from '../lib/cluster.js';
+import { circlePolygon } from '../lib/geo.js';
 
 const CARTO_ATTR =
   '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> · &copy; <a href="https://carto.com/">CARTO</a>';
@@ -10,7 +11,6 @@ const tiles = (style) =>
     (s) => `https://${s}.basemaps.cartocdn.com/${style}/{z}/{x}/{y}{r}.png`,
   );
 
-// Paletas por tema. El modo claro hace que la sombra proyectada se vea bien.
 const THEMES = {
   light: {
     base: tiles('light_all'),
@@ -37,6 +37,8 @@ const EMPTY = { type: 'FeatureCollection', features: [] };
 function makeStyle(theme) {
   return {
     version: 8,
+    // Glyphs públicos (sin clave) para las etiquetas de los clusters.
+    glyphs: 'https://fonts.openmaptiles.org/{fontstack}/{range}.pbf',
     sources: {
       carto: {
         type: 'raster',
@@ -62,6 +64,9 @@ function popupHTML(p) {
       : p.open === 'closed'
         ? '🔴 Cerrado ahora'
         : '⚪ Horario sin datos';
+  const web = p.website
+    ? `<div class="popup-web"><a href="${p.website}" target="_blank" rel="noopener">🔗 Web</a></div>`
+    : '';
   return `
     <div class="popup">
       <strong class="popup-name">${p.name}</strong>
@@ -71,6 +76,7 @@ function popupHTML(p) {
       ${p.dist ? `<div class="popup-dist">📍 ${p.dist}</div>` : ''}
       <div class="popup-open muted">${open}</div>
       <div class="popup-terrace muted">${terrace}</div>
+      ${web}
     </div>`;
 }
 
@@ -79,13 +85,8 @@ function sunLight(sun) {
   if (!sun.isUp) {
     return { anchor: 'map', position: [1.5, 0, 25], color: '#aab4c8', intensity: 0.2 };
   }
-  const polar = Math.max(8, 90 - sun.altitudeDeg); // 0 = cenit
-  return {
-    anchor: 'map',
-    position: [1.5, sun.azimuthDeg, polar],
-    color: '#fff4e0',
-    intensity: 0.45,
-  };
+  const polar = Math.max(8, 90 - sun.altitudeDeg);
+  return { anchor: 'map', position: [1.5, sun.azimuthDeg, polar], color: '#fff4e0', intensity: 0.45 };
 }
 
 export default function MapView({
@@ -98,6 +99,8 @@ export default function MapView({
   onMoveEnd,
   focus,
   userLoc,
+  initialCenter,
+  initialBounds,
 }) {
   const containerRef = useRef(null);
   const mapRef = useRef(null);
@@ -105,10 +108,8 @@ export default function MapView({
   const moveCb = useRef(onMoveEnd);
   moveCb.current = onMoveEnd;
 
-  const barsRef = useRef(EMPTY);
   const shadowRef = useRef(EMPTY);
   const buildingRef = useRef(EMPTY);
-  barsRef.current = barsFC || EMPTY;
   shadowRef.current = shadowFC || EMPTY;
   buildingRef.current = buildingsFC || EMPTY;
   const themeRef = useRef(theme);
@@ -116,17 +117,42 @@ export default function MapView({
   const sunRef = useRef(sun);
   sunRef.current = sun;
 
+  // Índice de clustering + función para refrescar (recalcula al mover/zoom).
+  const clusterIndexRef = useRef(null);
+  const updateClustersRef = useRef(() => {});
+  updateClustersRef.current = () => {
+    const map = mapRef.current;
+    if (!map || !readyRef.current) return;
+    const idx = clusterIndexRef.current;
+    if (!idx) {
+      map.getSource('clusters')?.setData(EMPTY);
+      map.getSource('bars')?.setData(EMPTY);
+      return;
+    }
+    const b = map.getBounds();
+    const { clusters, points } = queryClusters(
+      idx,
+      [b.getWest(), b.getSouth(), b.getEast(), b.getNorth()],
+      map.getZoom(),
+    );
+    map.getSource('clusters')?.setData({ type: 'FeatureCollection', features: clusters });
+    map.getSource('bars')?.setData({ type: 'FeatureCollection', features: points });
+  };
+
   // Inicializa el mapa una vez.
   useEffect(() => {
     const map = new maplibregl.Map({
       container: containerRef.current,
       style: makeStyle(themeRef.current),
-      center: [SEVILLA.center[1], SEVILLA.center[0]],
+      center: initialCenter || [-5.9845, 37.3891],
       zoom: 14,
       attributionControl: { compact: true },
       maxPitch: 75,
     });
     mapRef.current = map;
+    if (initialBounds) {
+      map.fitBounds(initialBounds, { padding: 30, maxZoom: 15, animate: false });
+    }
 
     const emitMove = () => {
       const b = map.getBounds();
@@ -134,19 +160,27 @@ export default function MapView({
         bbox: [b.getSouth(), b.getWest(), b.getNorth(), b.getEast()],
         zoom: map.getZoom(),
       });
+      updateClustersRef.current();
     };
 
     map.addControl(new maplibregl.NavigationControl({ visualizePitch: true }), 'bottom-right');
-    map.addControl(new maplibregl.GeolocateControl({ trackUserLocation: false }), 'bottom-right');
 
     map.on('load', () => {
       const t = THEMES[themeRef.current];
       map.setLight(sunLight(sunRef.current));
 
+      map.addSource('user-accuracy', { type: 'geojson', data: EMPTY });
       map.addSource('shadows', { type: 'geojson', data: EMPTY });
       map.addSource('buildings', { type: 'geojson', data: EMPTY });
+      map.addSource('clusters', { type: 'geojson', data: EMPTY });
       map.addSource('bars', { type: 'geojson', data: EMPTY });
 
+      map.addLayer({
+        id: 'user-accuracy',
+        type: 'fill',
+        source: 'user-accuracy',
+        paint: { 'fill-color': '#2f6df0', 'fill-opacity': 0.12 },
+      });
       map.addLayer({
         id: 'shadows',
         type: 'fill',
@@ -176,6 +210,7 @@ export default function MapView({
           'fill-extrusion-vertical-gradient': true,
         },
       });
+      // Bares individuales (no agrupados).
       map.addLayer({
         id: 'bars',
         type: 'circle',
@@ -185,16 +220,43 @@ export default function MapView({
           'circle-radius': ['interpolate', ['linear'], ['zoom'], 12, 3, 16, 7, 19, 11],
           'circle-stroke-width': 1.5,
           'circle-stroke-color': t.barStroke,
-          // Los bares confirmados cerrados se atenúan.
           'circle-opacity': ['case', ['==', ['get', 'open'], 'closed'], 0.3, 0.95],
           'circle-stroke-opacity': ['case', ['==', ['get', 'open'], 'closed'], 0.3, 1],
         },
       });
+      // Clusters.
+      map.addLayer({
+        id: 'clusters',
+        type: 'circle',
+        source: 'clusters',
+        paint: {
+          'circle-color': ['get', 'clusterColor'],
+          'circle-opacity': 0.9,
+          'circle-stroke-width': 2,
+          'circle-stroke-color': '#ffffff',
+          'circle-radius': [
+            'step',
+            ['get', 'point_count'],
+            16, 10, 20, 50, 26, 200, 34,
+          ],
+        },
+      });
+      map.addLayer({
+        id: 'cluster-count',
+        type: 'symbol',
+        source: 'clusters',
+        layout: {
+          'text-field': ['get', 'point_count_abbreviated'],
+          'text-font': ['Noto Sans Bold'],
+          'text-size': 13,
+        },
+        paint: { 'text-color': '#10131a' },
+      });
 
       readyRef.current = true;
-      map.getSource('bars').setData(barsRef.current);
       map.getSource('shadows').setData(shadowRef.current);
       map.getSource('buildings').setData(buildingRef.current);
+      updateClustersRef.current();
       emitMove();
     });
 
@@ -202,20 +264,33 @@ export default function MapView({
     map.on('click', 'bars', (e) => {
       const f = e.features?.[0];
       if (!f) return;
-      popup.setLngLat(e.lngLat).setHTML(popupHTML(f.properties)).addTo(map);
+      popup.setLngLat(f.geometry.coordinates).setHTML(popupHTML(f.properties)).addTo(map);
     });
-    map.on('mouseenter', 'bars', () => (map.getCanvas().style.cursor = 'pointer'));
-    map.on('mouseleave', 'bars', () => (map.getCanvas().style.cursor = ''));
+    // Click en cluster: acercar para desagrupar.
+    map.on('click', 'clusters', (e) => {
+      const f = e.features?.[0];
+      if (!f) return;
+      map.flyTo({ center: f.geometry.coordinates, zoom: Math.min(map.getZoom() + 2, 20), speed: 1.2 });
+    });
+    const pointer = (id) => {
+      map.on('mouseenter', id, () => (map.getCanvas().style.cursor = 'pointer'));
+      map.on('mouseleave', id, () => (map.getCanvas().style.cursor = ''));
+    };
+    pointer('bars');
+    pointer('clusters');
     map.on('moveend', emitMove);
 
     return () => map.remove();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Datos.
+  // Reconstruye el índice de clusters cuando cambian los bares.
   useEffect(() => {
-    if (readyRef.current) mapRef.current.getSource('bars')?.setData(barsFC || EMPTY);
+    clusterIndexRef.current =
+      barsFC && barsFC.features.length ? buildClusterIndex(barsFC.features) : null;
+    updateClustersRef.current();
   }, [barsFC]);
+
   useEffect(() => {
     if (readyRef.current) mapRef.current.getSource('shadows')?.setData(shadowFC || EMPTY);
   }, [shadowFC]);
@@ -231,7 +306,6 @@ export default function MapView({
     map.easeTo({ pitch: mode3d ? 55 : 0, duration: 600 });
   }, [mode3d]);
 
-  // Iluminacion segun el sol.
   useEffect(() => {
     const map = mapRef.current;
     if (!map || !readyRef.current) return;
@@ -252,7 +326,7 @@ export default function MapView({
     map.setPaintProperty('bars', 'circle-stroke-color', t.barStroke);
   }, [theme]);
 
-  // Vuela a un punto cuando cambia `focus` (mi ubicación o un bar de la lista).
+  // Vuela a un punto cuando cambia `focus`.
   useEffect(() => {
     const map = mapRef.current;
     if (!map || !readyRef.current || !focus) return;
@@ -260,7 +334,7 @@ export default function MapView({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [focus?.key]);
 
-  // Marcador de la posición del usuario.
+  // Marcador de la posición del usuario + anillo de precisión.
   const userMarkerRef = useRef(null);
   useEffect(() => {
     const map = mapRef.current;
@@ -268,6 +342,7 @@ export default function MapView({
     if (!userLoc) {
       userMarkerRef.current?.remove();
       userMarkerRef.current = null;
+      map.getSource('user-accuracy')?.setData(EMPTY);
       return;
     }
     if (!userMarkerRef.current) {
@@ -276,6 +351,24 @@ export default function MapView({
       userMarkerRef.current = new maplibregl.Marker({ element: el });
     }
     userMarkerRef.current.setLngLat([userLoc.lng, userLoc.lat]).addTo(map);
+    const acc = userLoc.accuracy && userLoc.accuracy > 0 ? Math.min(userLoc.accuracy, 2000) : 0;
+    map.getSource('user-accuracy')?.setData(
+      acc
+        ? {
+            type: 'FeatureCollection',
+            features: [
+              {
+                type: 'Feature',
+                geometry: {
+                  type: 'Polygon',
+                  coordinates: [circlePolygon(userLoc.lat, userLoc.lng, acc)],
+                },
+                properties: {},
+              },
+            ],
+          }
+        : EMPTY,
+    );
   }, [userLoc]);
 
   return <div ref={containerRef} className="map" />;

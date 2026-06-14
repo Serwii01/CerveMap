@@ -41,12 +41,13 @@ export function weatherEmoji(code) {
 
 /**
  * Devuelve la meteo horaria de los proximos dias para poder consultar
- * cualquier hora seleccionada. Cacheamos en memoria por sesion.
+ * cualquier hora seleccionada. Cacheamos en memoria por coordenada (multiciudad).
  */
-let cache = null;
+const cache = new Map();
 
 export async function fetchWeather(lat, lng, signal) {
-  if (cache) return cache;
+  const key = `${lat.toFixed(2)},${lng.toFixed(2)}`;
+  if (cache.has(key)) return cache.get(key);
   const params = new URLSearchParams({
     latitude: lat,
     longitude: lng,
@@ -60,7 +61,7 @@ export async function fetchWeather(lat, lng, signal) {
   });
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   const data = await res.json();
-  cache = data;
+  cache.set(key, data);
   return data;
 }
 

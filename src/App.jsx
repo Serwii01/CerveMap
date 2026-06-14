@@ -2,12 +2,13 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import MapView from './components/MapView.jsx';
 import TimeControls from './components/TimeControls.jsx';
 import SunCompass from './components/SunCompass.jsx';
+import WelcomeScreen from './components/WelcomeScreen.jsx';
+import FilterBar from './components/FilterBar.jsx';
 import {
-  fetchBars,
+  fetchBarsInBbox,
   fetchBuildings,
   barsCacheInfo,
   hasTerrace,
-  SEVILLA,
 } from './lib/overpass.js';
 import {
   fetchWeather,
@@ -18,20 +19,13 @@ import {
 import { getSunPosition, getSunTimes } from './lib/sun.js';
 import { classifyBar, classifyByShadow, CATEGORY_META, CATEGORY } from './lib/classify.js';
 import { openState } from './lib/hours.js';
-import { haversine, distanceText, formatDistance, walkMinutes, rankScore } from './lib/geo.js';
-import {
-  makeProjector,
-  prepareBuilding,
-  buildShadow,
-  buildShadowIndex,
-  isInAnyShadowIndexed,
-} from './lib/geometry.js';
+import { haversine, distanceText, formatDistance, walkMinutes } from './lib/geo.js';
+import { makeProjector, prepareBuilding, computeShadowData } from './lib/geometry.js';
+import { expandBbox, newAreaFraction, bboxCenter } from './lib/viewport.js';
+import { SEVILLA_CITY, loadSavedCity, saveCity, cityBounds } from './lib/city.js';
 
-const [LAT, LNG] = SEVILLA.center;
 const MIN_ZOOM_3D = 15;
-
-const inBbox = ([lng, lat], [s, w, n, e]) =>
-  lat >= s && lat <= n && lng >= w && lng <= e;
+const MAX_BARS = 2000;
 
 /** Texto relativo "hace X" a partir de un timestamp. */
 function formatAgo(ts) {
@@ -44,38 +38,65 @@ function formatAgo(ts) {
   return `hace ${Math.floor(h / 24)} d`;
 }
 
+/** Une bares previos + nuevos (dedupe por id) y limita a `cap` por cercanía al centro. */
+function mergeBars(prev, incoming, center, cap = MAX_BARS) {
+  const byId = new Map();
+  for (const b of prev) byId.set(b.id, b);
+  for (const b of incoming) byId.set(b.id, b);
+  let arr = Array.from(byId.values());
+  if (arr.length > cap) {
+    const [cx, cy] = center;
+    const d2 = (b) => (b.lng - cx) ** 2 + (b.lat - cy) ** 2;
+    arr.sort((a, b) => d2(a) - d2(b));
+    arr = arr.slice(0, cap);
+  }
+  return arr;
+}
+
 export default function App() {
+  const [city, setCity] = useState(() => loadSavedCity());
+  const LAT = city?.lat ?? SEVILLA_CITY.lat;
+  const LNG = city?.lon ?? SEVILLA_CITY.lon;
+
   const [date, setDate] = useState(() => new Date());
   const [bars, setBars] = useState([]);
-  const [barsState, setBarsState] = useState('loading');
-  const [weather, setWeather] = useState(null);
+  const [barsLoading, setBarsLoading] = useState(false);
+  const [barsError, setBarsError] = useState(false);
   const [barsSavedAt, setBarsSavedAt] = useState(null);
+  const [weather, setWeather] = useState(null);
   const [panelOpen, setPanelOpen] = useState(true);
 
   const [mode3d, setMode3d] = useState(false);
-  const [onlyOpen, setOnlyOpen] = useState(false);
-  const [onlyTerrace, setOnlyTerrace] = useState(false);
-  const [userLoc, setUserLoc] = useState(null); // {lat,lng}
-  const [geoState, setGeoState] = useState('idle'); // idle|locating|denied|error
-  const [focus, setFocus] = useState(null); // {lng,lat,zoom,key}
+  const [filters, setFilters] = useState({ onlySun: false, onlyTerrace: false, onlyOpen: false });
+  const [filterCollapsed, setFilterCollapsed] = useState(true);
+  const [userLoc, setUserLoc] = useState(null); // {lat,lng,accuracy}
+  const [tracking, setTracking] = useState(false);
+  const [toast, setToast] = useState(null);
+  const [focus, setFocus] = useState(null);
   const [canInstall, setCanInstall] = useState(false);
   const installEvent = useRef(null);
-  const [theme, setTheme] = useState(
-    () => localStorage.getItem('cervemap-theme') || 'light',
-  );
-  const [buildings, setBuildings] = useState([]);
-  const [buildingsBbox, setBuildingsBbox] = useState(null);
-  const [buildingsState, setBuildingsState] = useState('idle'); // idle|loading|ok|error
-  const [view, setView] = useState(null); // {bbox, zoom}
-  const lastFetchKey = useRef(null);
+  const [theme, setTheme] = useState(() => localStorage.getItem('cervemap-theme') || 'light');
 
-  // Aplica el tema al documento y lo persiste.
+  const [buildings, setBuildings] = useState([]);
+  const [buildingsState, setBuildingsState] = useState('idle');
+  const [view, setView] = useState(null);
+
+  const [shadowStates, setShadowStates] = useState(null); // Uint8Array
+  const [shadowRings, setShadowRings] = useState([]);
+
+  const loadedBboxRef = useRef(null);
+  const lastFetchKey = useRef(null);
+  const barsCtrl = useRef(null);
+  const focusKey = useRef(0);
+  const watchRef = useRef(null);
+
+  // --- Tema ---
   useEffect(() => {
     document.documentElement.setAttribute('data-theme', theme);
     localStorage.setItem('cervemap-theme', theme);
   }, [theme]);
 
-  // --- PWA: captura el evento de instalación para el banner "Instalar" ---
+  // --- PWA: banner de instalación ---
   useEffect(() => {
     const onPrompt = (e) => {
       e.preventDefault();
@@ -107,54 +128,155 @@ export default function App() {
     setCanInstall(false);
   };
 
-  const proj = useMemo(() => makeProjector(LAT, LNG), []);
-  const sun = useMemo(() => getSunPosition(date, LAT, LNG), [date]);
-  const sunTimes = useMemo(() => getSunTimes(date, LAT, LNG), [date]);
+  const sun = useMemo(() => getSunPosition(date, LAT, LNG), [date, LAT, LNG]);
+  const sunTimes = useMemo(() => getSunTimes(date, LAT, LNG), [date, LAT, LNG]);
 
-  // --- Carga de bares (con caché IndexedDB; force omite el caché) ---
-  const barsCtrl = useRef(null);
-  const loadBars = useCallback((force = false) => {
+  // ===== Selección de ciudad =====
+  const selectCity = useCallback((c, loc = null) => {
+    saveCity(c);
+    setBars([]);
+    setBuildings([]);
+    setBuildingsState('idle');
+    setShadowStates(null);
+    setShadowRings([]);
+    setWeather(null);
+    setBarsError(false);
+    loadedBboxRef.current = null;
+    lastFetchKey.current = null;
+    if (loc) setUserLoc(loc);
+    setCity(c);
+  }, []);
+  const changeCity = () => setCity(null);
+
+  // ===== Web Worker de sombras =====
+  const workerRef = useRef(null);
+  const latestReqId = useRef(0);
+  const pendingRef = useRef(null);
+  const rafRef = useRef(0);
+  const barsLenRef = useRef(0);
+  barsLenRef.current = bars.length;
+
+  useEffect(() => {
+    let worker = null;
+    try {
+      worker = new Worker(new URL('./workers/shadows.worker.js', import.meta.url), { type: 'module' });
+    } catch {
+      worker = null; // fallback al hilo principal
+    }
+    workerRef.current = worker;
+    if (worker) {
+      worker.onmessage = (e) => {
+        const { reqId, states, rings } = e.data;
+        if (reqId !== latestReqId.current) return; // descarta respuestas viejas
+        pendingRef.current = { states, rings };
+        if (!rafRef.current) {
+          rafRef.current = requestAnimationFrame(() => {
+            rafRef.current = 0;
+            const p = pendingRef.current;
+            pendingRef.current = null;
+            if (p && p.states.length === barsLenRef.current) {
+              setShadowStates(p.states);
+              setShadowRings(p.rings);
+            }
+          });
+        }
+      };
+    }
+    return () => {
+      worker?.terminate();
+      if (rafRef.current) cancelAnimationFrame(rafRef.current);
+    };
+  }, []);
+
+  // Envía los edificios al worker (se preparan una sola vez).
+  useEffect(() => {
+    const w = workerRef.current;
+    if (!w || !mode3d || buildings.length === 0) return;
+    w.postMessage({
+      type: 'setBuildings',
+      origin: [LAT, LNG],
+      buildings: buildings.map((b) => ({ ring: b.ring, height: b.height })),
+    });
+  }, [buildings, mode3d, LAT, LNG]);
+
+  // Recalcula estados de sombra al cambiar sol / bares / edificios.
+  useEffect(() => {
+    if (!mode3d || !sun.isUp || buildings.length === 0 || bars.length === 0) {
+      setShadowStates(null);
+      setShadowRings([]);
+      return;
+    }
+    const coords = new Float64Array(bars.length * 2);
+    for (let i = 0; i < bars.length; i++) {
+      coords[2 * i] = bars[i].lng;
+      coords[2 * i + 1] = bars[i].lat;
+    }
+    const reqId = ++latestReqId.current;
+    const sunMsg = { isUp: sun.isUp, azimuthDeg: sun.azimuthDeg, altitudeDeg: sun.altitudeDeg };
+    const w = workerRef.current;
+    if (w) {
+      w.postMessage({ type: 'compute', reqId, sun: sunMsg, coords }, [coords.buffer]);
+    } else {
+      const proj = makeProjector(LAT, LNG);
+      const prepared = buildings.map((b) => prepareBuilding(b, proj));
+      const { states, rings } = computeShadowData(prepared, sunMsg, coords, [LAT, LNG]);
+      setShadowStates(states);
+      setShadowRings(rings);
+    }
+  }, [mode3d, sun, buildings, bars, LAT, LNG]);
+
+  // ===== Carga lazy de bares por viewport =====
+  const maybeLoadBars = useCallback((v, force = false) => {
+    if (!v) return;
+    const vp = expandBbox(v.bbox, 0.2);
+    if (!force && newAreaFraction(vp, loadedBboxRef.current) <= 0.3) return;
     barsCtrl.current?.abort();
     const ctrl = new AbortController();
     barsCtrl.current = ctrl;
-    setBarsState('loading');
-    fetchBars(SEVILLA.bbox, ctrl.signal, { force })
-      .then((d) => {
-        setBars(d);
-        setBarsState('ok');
-        barsCacheInfo().then((m) => setBarsSavedAt(m?.savedAt ?? Date.now()));
+    setBarsLoading(true);
+    fetchBarsInBbox(vp, ctrl.signal, { force })
+      .then((incoming) => {
+        loadedBboxRef.current = vp;
+        const center = bboxCenter(vp);
+        setBars((prev) => mergeBars(prev, incoming, center));
+        setBarsSavedAt(barsCacheInfo()?.savedAt ?? Date.now());
+        setBarsError(false);
+        setBarsLoading(false);
       })
       .catch((err) => {
-        if (err.name !== 'AbortError') setBarsState('error');
+        if (err.name !== 'AbortError') {
+          setBarsError(true);
+          setBarsLoading(false);
+        }
       });
   }, []);
 
+  // moveend (en `view`) con debounce de 600 ms.
   useEffect(() => {
-    loadBars(false);
-    return () => barsCtrl.current?.abort();
-  }, [loadBars]);
+    if (!view || !city) return;
+    const t = setTimeout(() => maybeLoadBars(view), 600);
+    return () => clearTimeout(t);
+  }, [view, city, maybeLoadBars]);
 
-  // --- Carga de meteo ---
+  // --- Meteo (por ciudad) ---
   useEffect(() => {
+    if (!city) return;
     const ctrl = new AbortController();
     fetchWeather(LAT, LNG, ctrl.signal).then(setWeather).catch(() => {});
     return () => ctrl.abort();
-  }, []);
+  }, [city, LAT, LNG]);
 
-  // --- Carga de edificios cuando hace falta (modo 3D + zoom suficiente) ---
+  // --- Edificios (modo 3D + zoom suficiente) por viewport ---
   useEffect(() => {
     if (!mode3d || !view || view.zoom < MIN_ZOOM_3D) return;
-    // Clave por bbox redondeado para no repetir la misma consulta.
     const key = view.bbox.map((v) => v.toFixed(3)).join(',');
     if (key === lastFetchKey.current) return;
     lastFetchKey.current = key;
-
     const ctrl = new AbortController();
     setBuildingsState('loading');
     fetchBuildings(view.bbox, ctrl.signal)
       .then((d) => {
         setBuildings(d);
-        setBuildingsBbox(view.bbox);
         setBuildingsState('ok');
       })
       .catch((err) => {
@@ -163,30 +285,9 @@ export default function App() {
     return () => ctrl.abort();
   }, [mode3d, view]);
 
-  // Precomputo independiente del sol (proyeccion + envolvente): solo al cargar.
-  const preparedBuildings = useMemo(
-    () => buildings.map((b) => prepareBuilding(b, proj)),
-    [buildings, proj],
-  );
-
-  // --- Sombras reales (geometria) ---
-  const shadows = useMemo(() => {
-    if (!mode3d || !sun.isUp || !preparedBuildings.length) return [];
-    const out = [];
-    for (const b of preparedBuildings) {
-      const s = buildShadow(b, sun, proj);
-      if (s) out.push(s);
-    }
-    return out;
-  }, [mode3d, sun, preparedBuildings, proj]);
-
-  // Indice espacial para el test bar-en-sombra.
-  const shadowIndex = useMemo(() => buildShadowIndex(shadows), [shadows]);
-
-  const shadowsActive = mode3d && sun.isUp && buildings.length > 0;
   const heightStats = useMemo(() => {
     let catastro = 0, osm = 0, fallback = 0;
-    if (shadowsActive) {
+    if (mode3d && buildings.length) {
       for (const b of buildings) {
         if (b.heightSource === 'catastro') catastro++;
         else if (b.heightSource === 'fallback') fallback++;
@@ -194,85 +295,85 @@ export default function App() {
       }
     }
     return { catastro, osm, fallback };
-  }, [shadowsActive, buildings]);
+  }, [mode3d, buildings]);
 
-  // --- Evaluacion de cada bar ---
-  const evaluated = useMemo(
-    () =>
-      bars.map((bar) => {
-        const useShadow =
-          shadowsActive && buildingsBbox && inBbox([bar.lng, bar.lat], buildingsBbox);
-        const ev = useShadow
-          ? classifyByShadow(sun, isInAnyShadowIndexed([bar.lng, bar.lat], shadowIndex, proj))
-          : classifyBar(sun, bar);
-        return {
-          bar,
-          ev,
-          real: useShadow,
-          open: openState(bar.openingHours, date),
-          terrace: hasTerrace(bar),
-          dist: userLoc ? haversine(userLoc, { lat: bar.lat, lng: bar.lng }) : null,
-        };
-      }),
-    [bars, shadowsActive, buildingsBbox, shadowIndex, sun, proj, date, userLoc],
+  const shadowsActive = mode3d && sun.isUp && buildings.length > 0;
+
+  // --- Evaluación de cada bar (estado real del worker o heurística) ---
+  const evaluated = useMemo(() => {
+    const useReal = mode3d && sun.isUp && shadowStates && shadowStates.length === bars.length;
+    return bars.map((bar, i) => {
+      const ev = useReal ? classifyByShadow(sun, shadowStates[i] === 2) : classifyBar(sun, bar);
+      return {
+        bar,
+        ev,
+        real: useReal,
+        open: openState(bar.openingHours, date),
+        terrace: hasTerrace(bar),
+        dist: userLoc ? haversine(userLoc, { lat: bar.lat, lng: bar.lng }) : null,
+      };
+    });
+  }, [bars, mode3d, sun, shadowStates, date, userLoc]);
+
+  const passesFilters = useCallback(
+    ({ ev, open, terrace }) => {
+      if (filters.onlySun && ev.category !== CATEGORY.SUN) return false;
+      if (filters.onlyTerrace && !terrace) return false;
+      if (filters.onlyOpen && open === 'closed') return false;
+      return true;
+    },
+    [filters],
   );
 
-  // Lista ordenada por cercanía + sol (solo con ubicación conocida).
+  // Lista ordenada por cercanía + sol.
   const ranked = useMemo(() => {
     if (!userLoc) return [];
     return evaluated
-      .filter(({ open, terrace }) => {
-        if (onlyOpen && open === 'closed') return false;
-        if (onlyTerrace && !terrace) return false;
-        return true;
+      .filter(passesFilters)
+      .map((e) => {
+        const d = e.dist ?? Infinity;
+        const score = (1 - Math.min(d / 500, 1)) * 0.5 + (e.ev.category === CATEGORY.SUN ? 1 : 0) * 0.5;
+        return { ...e, score };
       })
-      .map((e) => ({ ...e, score: rankScore(e.dist ?? Infinity, e.ev.category) }))
       .sort((a, b) => b.score - a.score)
       .slice(0, 6);
-  }, [evaluated, userLoc, onlyOpen, onlyTerrace]);
+  }, [evaluated, userLoc, passesFilters]);
 
-  // --- GeoJSON para MapLibre ---
   const barsFC = useMemo(
     () => ({
       type: 'FeatureCollection',
-      features: evaluated
-        // "Solo abiertos" oculta los confirmados cerrados (los de horario
-        // desconocido se mantienen porque no se puede afirmar que estén cerrados).
-        .filter(({ open, terrace }) => {
-          if (onlyOpen && open === 'closed') return false;
-          if (onlyTerrace && !terrace) return false;
-          return true;
-        })
-        .map(({ bar, ev, open, terrace, dist }) => ({
-          type: 'Feature',
-          geometry: { type: 'Point', coordinates: [bar.lng, bar.lat] },
-          properties: {
-            name: bar.name,
-            address: bar.address || '',
-            terrace: terrace ? 'yes' : bar.outdoorSeating === 'no' ? 'no' : '',
-            open,
-            dist: dist != null ? distanceText(dist) : '',
-            color: ev.color,
-            emoji: ev.emoji,
-            label: ev.label,
-            note: ev.note,
-          },
-        })),
+      features: evaluated.filter(passesFilters).map(({ bar, ev, open, terrace, dist }) => ({
+        type: 'Feature',
+        geometry: { type: 'Point', coordinates: [bar.lng, bar.lat] },
+        properties: {
+          name: bar.name,
+          address: bar.address || '',
+          website: bar.website || '',
+          terrace: terrace ? 'yes' : bar.outdoorSeating === 'no' ? 'no' : '',
+          open,
+          dist: dist != null ? distanceText(dist) : '',
+          cat: ev.category,
+          color: ev.color,
+          emoji: ev.emoji,
+          label: ev.label,
+          note: ev.note,
+        },
+      })),
     }),
-    [evaluated, onlyOpen, onlyTerrace],
+    [evaluated, passesFilters],
   );
 
   const shadowFC = useMemo(
     () => ({
       type: 'FeatureCollection',
-      features: shadows.map((s, i) => ({
+      features: shadowRings.map((ring, i) => ({
         type: 'Feature',
         id: i,
-        geometry: { type: 'Polygon', coordinates: [s.ringLngLat] },
+        geometry: { type: 'Polygon', coordinates: [ring] },
         properties: {},
       })),
     }),
-    [shadows],
+    [shadowRings],
   );
 
   const buildingsFC = useMemo(
@@ -291,23 +392,57 @@ export default function App() {
 
   const onMoveEnd = useCallback((v) => setView(v), []);
 
-  const focusKey = useRef(0);
+  // ===== Geolocalización =====
+  const showToast = useCallback((msg) => {
+    setToast(msg);
+    setTimeout(() => setToast(null), 4000);
+  }, []);
+
   const locateMe = useCallback(() => {
     if (!navigator.geolocation) {
-      setGeoState('error');
+      showToast('Activa la ubicación para ver bares cercanos');
       return;
     }
-    setGeoState('locating');
     navigator.geolocation.getCurrentPosition(
       (pos) => {
-        const loc = { lat: pos.coords.latitude, lng: pos.coords.longitude };
+        const loc = { lat: pos.coords.latitude, lng: pos.coords.longitude, accuracy: pos.coords.accuracy };
         setUserLoc(loc);
-        setGeoState('idle');
-        setFocus({ lng: loc.lng, lat: loc.lat, zoom: 15, key: ++focusKey.current });
+        setFocus({ lng: loc.lng, lat: loc.lat, zoom: 16, key: ++focusKey.current });
       },
-      () => setGeoState('denied'),
+      () => showToast('Activa la ubicación para ver bares cercanos'),
       { enableHighAccuracy: true, timeout: 10000 },
     );
+  }, [showToast]);
+
+  const toggleTracking = useCallback(() => {
+    if (watchRef.current != null) {
+      navigator.geolocation.clearWatch(watchRef.current);
+      watchRef.current = null;
+      setTracking(false);
+      return;
+    }
+    if (!navigator.geolocation) {
+      showToast('Activa la ubicación para ver bares cercanos');
+      return;
+    }
+    setTracking(true);
+    watchRef.current = navigator.geolocation.watchPosition(
+      (pos) => {
+        const loc = { lat: pos.coords.latitude, lng: pos.coords.longitude, accuracy: pos.coords.accuracy };
+        setUserLoc(loc);
+        setFocus({ lng: loc.lng, lat: loc.lat, zoom: 16, key: ++focusKey.current });
+      },
+      () => {
+        showToast('Activa la ubicación para ver bares cercanos');
+        setTracking(false);
+        watchRef.current = null;
+      },
+      { enableHighAccuracy: true, maximumAge: 2000 },
+    );
+  }, [showToast]);
+
+  useEffect(() => () => {
+    if (watchRef.current != null) navigator.geolocation.clearWatch(watchRef.current);
   }, []);
 
   const focusBar = useCallback((bar) => {
@@ -317,7 +452,6 @@ export default function App() {
   const wx = useMemo(() => (weather ? weatherAt(weather, date) : null), [weather, date]);
   const fmt = (d) =>
     d ? d.toLocaleTimeString('es-ES', { hour: '2-digit', minute: '2-digit' }) : '--:--';
-
   const dataAgo = formatAgo(barsSavedAt);
 
   const zoomLow = mode3d && view && view.zoom < MIN_ZOOM_3D;
@@ -325,10 +459,14 @@ export default function App() {
     ? [CATEGORY.SUN, CATEGORY.SHADE, CATEGORY.NIGHT].map((c) => CATEGORY_META[c])
     : Object.values(CATEGORY_META);
 
+  // ===== Pantalla de inicio si no hay ciudad =====
+  if (!city) return <WelcomeScreen onSelect={selectCity} />;
+
   return (
     <div className="app">
       <MapView
-        barsFC={barsState === 'ok' ? barsFC : null}
+        key={`${city.lat},${city.lon}`}
+        barsFC={barsFC}
         shadowFC={shadowFC}
         buildingsFC={buildingsFC}
         mode3d={mode3d}
@@ -337,6 +475,8 @@ export default function App() {
         onMoveEnd={onMoveEnd}
         focus={focus}
         userLoc={userLoc}
+        initialCenter={[city.lon, city.lat]}
+        initialBounds={cityBounds(city)}
       />
 
       {canInstall && (
@@ -345,25 +485,24 @@ export default function App() {
             📲 Instala <strong>CerveMap</strong> para abrirla como una app
           </span>
           <div className="install-actions">
-            <button className="now-btn" type="button" onClick={installApp}>
-              Instalar
-            </button>
-            <button className="link-btn" type="button" onClick={dismissInstall}>
-              Ahora no
-            </button>
+            <button className="now-btn" type="button" onClick={installApp}>Instalar</button>
+            <button className="link-btn" type="button" onClick={dismissInstall}>Ahora no</button>
           </div>
         </div>
       )}
 
       <header className="topbar">
         <h1>
-          🍺 CerveMap <span className="sub">Sevilla · sol y sombra</span>
+          🍺 CerveMap <span className="sub">{city.name} · sol y sombra</span>
         </h1>
         <div className="topbar-actions">
+          <button className="toggle-panel" onClick={changeCity} title="Cambiar de ciudad">
+            🏙️ Cambiar ciudad
+          </button>
           <button
             className="icon-btn"
             onClick={() => setTheme((t) => (t === 'light' ? 'dark' : 'light'))}
-            aria-label={theme === 'light' ? 'Cambiar a modo oscuro' : 'Cambiar a modo claro'}
+            aria-label={theme === 'light' ? 'Modo oscuro' : 'Modo claro'}
             title={theme === 'light' ? 'Modo oscuro' : 'Modo claro'}
           >
             {theme === 'light' ? '🌙' : '☀️'}
@@ -372,19 +511,37 @@ export default function App() {
             className={`mode-btn ${mode3d ? 'active' : ''}`}
             onClick={() => setMode3d((v) => !v)}
             aria-pressed={mode3d}
-            title="Vista 3D con sombras reales de edificios"
+            title="Vista 3D con sombras reales"
           >
-            {mode3d ? '🏙️ 3D · sombras' : '🗺️ 2D'}
+            {mode3d ? '🏙️ 3D' : '🗺️ 2D'}
           </button>
-          <button
-            className="toggle-panel"
-            onClick={() => setPanelOpen((v) => !v)}
-            aria-expanded={panelOpen}
-          >
+          <button className="toggle-panel" onClick={() => setPanelOpen((v) => !v)} aria-expanded={panelOpen}>
             {panelOpen ? 'Ocultar' : 'Panel'}
           </button>
         </div>
       </header>
+
+      <FilterBar
+        filters={filters}
+        onChange={setFilters}
+        collapsed={filterCollapsed}
+        onToggleCollapsed={() => setFilterCollapsed((v) => !v)}
+      />
+
+      {/* Controles de geolocalización */}
+      <div className="geo-controls">
+        <button className="geo-btn" type="button" onClick={locateMe} title="Centrar en mi ubicación">
+          📍 Cerca de mí
+        </button>
+        <button
+          className={`geo-btn ${tracking ? 'active' : ''}`}
+          type="button"
+          onClick={toggleTracking}
+          title="Seguir mi posición"
+        >
+          {tracking ? '🔄 Siguiéndote' : '🔄 Seguirme'}
+        </button>
+      </div>
 
       <section className={`panel ${panelOpen ? 'open' : 'closed'}`}>
         <div className="panel-grid">
@@ -393,25 +550,19 @@ export default function App() {
             <div className="info-row">
               <span className="muted">Estado solar</span>
               <strong>
-                {sun.isUp
-                  ? `Sol a ${Math.round(sun.altitudeDeg)}° sobre el horizonte`
-                  : 'Sol bajo el horizonte'}
+                {sun.isUp ? `Sol a ${Math.round(sun.altitudeDeg)}° sobre el horizonte` : 'Sol bajo el horizonte'}
               </strong>
             </div>
             <div className="info-row">
               <span className="muted">Amanecer / Atardecer</span>
-              <strong>
-                {fmt(sunTimes.sunrise)} · {fmt(sunTimes.sunset)}
-              </strong>
+              <strong>{fmt(sunTimes.sunrise)} · {fmt(sunTimes.sunset)}</strong>
             </div>
             <div className="info-row">
               <span className="muted">Tiempo</span>
               <strong>
                 {wx && wx.temperature != null
                   ? `${weatherEmoji(wx.code)} ${Math.round(wx.temperature)}°C · ${weatherText(wx.code)}`
-                  : weather
-                    ? 'Sin dato para esta hora'
-                    : 'Cargando meteo…'}
+                  : weather ? 'Sin dato para esta hora' : 'Cargando meteo…'}
               </strong>
             </div>
             {wx && wx.cloudCover != null && (
@@ -424,23 +575,6 @@ export default function App() {
         </div>
 
         <TimeControls date={date} onChange={setDate} />
-
-        <div className="nearme-row">
-          <button
-            type="button"
-            className="nearme-btn"
-            onClick={locateMe}
-            disabled={geoState === 'locating'}
-          >
-            {geoState === 'locating' ? '📍 Localizando…' : 'Cerca de mí ☀️'}
-          </button>
-          {geoState === 'denied' && (
-            <span className="muted geo-msg">Permiso de ubicación denegado</span>
-          )}
-          {geoState === 'error' && (
-            <span className="muted geo-msg">Geolocalización no disponible</span>
-          )}
-        </div>
 
         {ranked.length > 0 && (
           <ul className="ranked">
@@ -465,27 +599,6 @@ export default function App() {
           </ul>
         )}
 
-        <div className="filters">
-          <button
-            type="button"
-            className={`filter-chip ${onlyOpen ? 'active' : ''}`}
-            aria-pressed={onlyOpen}
-            onClick={() => setOnlyOpen((v) => !v)}
-            title="Oculta los bares confirmados como cerrados a la hora elegida"
-          >
-            🕒 Solo abiertos ahora
-          </button>
-          <button
-            type="button"
-            className={`filter-chip ${onlyTerrace ? 'active' : ''}`}
-            aria-pressed={onlyTerrace}
-            onClick={() => setOnlyTerrace((v) => !v)}
-            title="Solo bares con terraza exterior confirmada en OSM"
-          >
-            ☂️ Con terraza
-          </button>
-        </div>
-
         <div className="legend">
           {visibleMeta.map((m) => (
             <span className="legend-item" key={m.label}>
@@ -494,87 +607,74 @@ export default function App() {
           ))}
         </div>
 
-        {/* Estado del modo sombra */}
         {shadowsActive ? (
           <p className="disclaimer ok">
-            ✅ <strong>Sombras reales</strong> calculadas con la geometría y altura
-            de {buildings.length} edificios para esta hora.{' '}
+            ✅ <strong>Sombras reales</strong> de {buildings.length} edificios para esta hora.{' '}
             {heightStats.osm} con altura de OSM
             {heightStats.catastro > 0 && (
-              <>
-                , <strong>{heightStats.catastro} con altura real del Catastro</strong>
-              </>
+              <>, <strong>{heightStats.catastro} con altura real del Catastro</strong></>
             )}
             {heightStats.fallback > 0 && `, ${heightStats.fallback} estimados en ~9 m`}.
-            Aproximación geométrica (no considera salientes ni vegetación).
+            Cálculo en segundo plano (Web Worker).
           </p>
         ) : mode3d ? (
           <p className="disclaimer">
             🏙️ Modo 3D activo.{' '}
             {zoomLow
-              ? 'Acércate con el zoom para cargar edificios y calcular sombras reales.'
+              ? 'Acércate con el zoom para cargar edificios y calcular sombras.'
               : buildingsState === 'loading'
                 ? 'Cargando edificios…'
                 : buildingsState === 'error'
                   ? 'No se pudieron cargar los edificios.'
                   : !sun.isUp
-                    ? 'El sol está bajo el horizonte: no hay sombras que proyectar.'
+                    ? 'El sol está bajo el horizonte: no hay sombras.'
                     : 'Mueve el mapa sobre una zona con edificios.'}
           </p>
         ) : (
           <p className="disclaimer">
-            ⚠️ Modo 2D: clasificación por <strong>heurística</strong> (altura del
-            sol + terraza de OSM), sin sombras reales. Activa <strong>3D ·
-            sombras</strong> para el cálculo geométrico con edificios.
+            ⚠️ Modo 2D: clasificación por <strong>heurística</strong> (altura del sol +
+            terraza). Activa <strong>3D</strong> para sombras geométricas reales.
           </p>
         )}
 
         <div className="data-status">
           <span className="muted">
-            {barsState === 'loading'
-              ? 'Actualizando datos del mapa…'
-              : dataAgo
-                ? `Datos del mapa actualizados ${dataAgo}`
-                : 'Datos del mapa en caché local'}
+            {barsLoading
+              ? 'Actualizando bares…'
+              : dataAgo ? `Bares actualizados ${dataAgo}` : 'Mueve el mapa para cargar bares'}
           </span>
           <button
             className="link-btn"
             type="button"
-            onClick={() => loadBars(true)}
-            disabled={barsState === 'loading'}
+            onClick={() => maybeLoadBars(view, true)}
+            disabled={barsLoading || !view}
           >
             ↻ Recargar
           </button>
         </div>
       </section>
 
-      {/* Overlays de estado */}
-      {barsState === 'loading' && (
-        <div className="overlay">
-          <div className="spinner" />
-          <p>Buscando bares en Sevilla…</p>
+      {/* Spinner sutil mientras se cargan bares */}
+      {barsLoading && (
+        <div className="mini-loading" aria-live="polite">
+          <span className="mini-spinner" /> Cargando…
         </div>
       )}
-      {barsState === 'error' && (
+
+      {barsError && bars.length === 0 && (
         <div className="overlay">
           <p>No se pudieron cargar los bares (Overpass).</p>
-          <button className="now-btn" onClick={() => loadBars(false)} type="button">
+          <button className="now-btn" onClick={() => maybeLoadBars(view, true)} type="button">
             Reintentar
           </button>
         </div>
       )}
-      {barsState === 'ok' && bars.length === 0 && (
-        <div className="overlay">
-          <p>No se encontraron bares en esta zona.</p>
-        </div>
-      )}
 
-      {barsState === 'ok' && bars.length > 0 && (
+      {bars.length > 0 && (
         <div className="badges">
           <div className="count-badge">
-            {bars.length} bares
-            {mode3d && buildingsState === 'loading' && ' · cargando edificios…'}
-            {shadowsActive && ` · ${shadows.length} sombras`}
+            {barsFC.features.length} bares
+            {shadowsActive && ` · ${shadowRings.length} sombras`}
           </div>
           {heightStats.catastro > 0 && (
             <div className="count-badge catastro" title="Alturas reales del Catastro español">
@@ -583,6 +683,8 @@ export default function App() {
           )}
         </div>
       )}
+
+      {toast && <div className="toast">{toast}</div>}
     </div>
   );
 }

@@ -315,14 +315,26 @@ body {
   letter-spacing: 0;
 }
 
-/* Punto de ubicación del usuario en el mapa */
+/* Punto de ubicación del usuario en el mapa (azul pulsante) */
 .user-dot {
   width: 16px;
   height: 16px;
   border-radius: 50%;
-  background: var(--accent-2);
+  background: #2f6df0;
   border: 3px solid #fff;
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent-2) 40%, transparent);
+  box-shadow: 0 0 0 2px rgba(47, 109, 240, 0.5);
+}
+.user-dot::after {
+  content: '';
+  position: absolute;
+  inset: -6px;
+  border-radius: 50%;
+  background: rgba(47, 109, 240, 0.35);
+  animation: userPulse 1.8s ease-out infinite;
+}
+@keyframes userPulse {
+  0% { transform: scale(0.6); opacity: 0.8; }
+  100% { transform: scale(2.6); opacity: 0; }
 }
 
 /* Lista ordenada por cercanía + sol */
@@ -573,6 +585,240 @@ body {
   font-weight: 600;
 }
 
+/* ---------- Pantalla de inicio ---------- */
+.welcome {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+  background:
+    radial-gradient(120% 80% at 50% -10%, rgba(245, 165, 36, 0.18), transparent 60%),
+    var(--bg);
+}
+.welcome-card {
+  width: 100%;
+  max-width: 460px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 18px;
+  box-shadow: var(--shadow);
+  padding: 28px 24px;
+}
+.welcome-title {
+  margin: 0;
+  font-size: 30px;
+  text-align: center;
+}
+.welcome-sub {
+  margin: 8px 0 20px;
+  text-align: center;
+  color: var(--muted);
+  font-size: 14px;
+}
+.welcome-search {
+  position: relative;
+}
+.welcome-search input {
+  width: 100%;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 13px 14px;
+  font-size: 16px;
+  color: var(--text);
+}
+.welcome-search input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+.welcome-spin {
+  position: absolute;
+  right: 14px;
+  top: 14px;
+  width: 18px;
+  height: 18px;
+  border: 2px solid var(--border);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+.welcome-results {
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  overflow: hidden;
+  max-height: 280px;
+  overflow-y: auto;
+}
+.welcome-results li + li {
+  border-top: 1px solid var(--border);
+}
+.welcome-results button {
+  width: 100%;
+  text-align: left;
+  background: var(--surface);
+  border: none;
+  padding: 11px 14px;
+  cursor: pointer;
+  color: var(--text);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.welcome-results button:hover {
+  background: var(--surface-2);
+}
+.welcome-result-name {
+  font-size: 15px;
+  font-weight: 600;
+}
+.welcome-result-label {
+  font-size: 11.5px;
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.welcome-actions {
+  display: flex;
+  gap: 10px;
+  margin-top: 18px;
+}
+.welcome-geo {
+  flex: 1;
+  background: var(--accent-2);
+  color: #fff;
+  border: none;
+  border-radius: 12px;
+  padding: 13px;
+  font-size: 14px;
+  font-weight: 700;
+  cursor: pointer;
+}
+.welcome-default {
+  background: var(--surface-2);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 13px 18px;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.welcome-msg {
+  margin: 12px 0 0;
+  text-align: center;
+  text-transform: none;
+  letter-spacing: 0;
+}
+
+/* ---------- Barra de filtros ---------- */
+.filterbar {
+  position: absolute;
+  z-index: 580;
+  top: 58px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: color-mix(in srgb, var(--surface) 92%, transparent);
+  backdrop-filter: blur(8px);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 5px 6px 5px 8px;
+  box-shadow: var(--shadow);
+  max-width: calc(100% - 24px);
+}
+.filterbar-toggle {
+  display: none;
+  background: none;
+  border: none;
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+  padding: 4px 6px;
+}
+.filterbar-chips {
+  display: flex;
+  gap: 6px;
+}
+
+/* ---------- Controles de geolocalización ---------- */
+.geo-controls {
+  position: absolute;
+  z-index: 560;
+  right: 10px;
+  bottom: 108px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  align-items: flex-end;
+}
+.geo-btn {
+  background: var(--surface);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 8px 13px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  box-shadow: var(--shadow);
+  white-space: nowrap;
+}
+.geo-btn.active {
+  background: var(--accent-2);
+  color: #fff;
+  border-color: var(--accent-2);
+}
+
+/* ---------- Spinner sutil y toast ---------- */
+.mini-loading {
+  position: absolute;
+  z-index: 560;
+  top: 104px;
+  left: 14px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 5px 12px;
+  font-size: 12px;
+  color: var(--muted);
+}
+.mini-spinner {
+  width: 13px;
+  height: 13px;
+  border: 2px solid var(--border);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+.toast {
+  position: absolute;
+  z-index: 700;
+  bottom: 26px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: #1b2230;
+  color: #fff;
+  border-radius: 10px;
+  padding: 10px 16px;
+  font-size: 13px;
+  box-shadow: var(--shadow);
+  max-width: 90%;
+  text-align: center;
+}
+
 /* ---------- Banner de instalación PWA ---------- */
 .install-banner {
   position: absolute;
@@ -598,6 +844,27 @@ body {
   align-items: center;
   gap: 8px;
   flex: 0 0 auto;
+}
+
+.popup-web {
+  margin-top: 6px;
+  font-size: 12px;
+}
+.popup-web a {
+  color: #2f6df0;
+}
+
+/* ---------- Responsive: móvil ---------- */
+@media (max-width: 560px) {
+  .filterbar.collapsed {
+    padding: 5px 10px;
+  }
+  .filterbar.collapsed .filterbar-chips {
+    display: none;
+  }
+  .filterbar-toggle {
+    display: inline-block;
+  }
 }
 
 /* ---------- Responsive: pantallas grandes ---------- */

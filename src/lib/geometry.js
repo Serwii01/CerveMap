@@ -155,6 +155,36 @@ export function isInAnyShadowIndexed(lngLat, index, proj) {
   return false;
 }
 
+/**
+ * Calcula, de una vez, las sombras (para dibujar) y el estado de cada bar.
+ * Compartido por el Web Worker y el hilo principal (fallback).
+ * @param {Array} prepared  edificios preparados con `prepareBuilding` (footHull)
+ * @param {{isUp,azimuthDeg,altitudeDeg}} sun
+ * @param {Float64Array} coords  [lng,lat,lng,lat,...] de los bares
+ * @param {[number,number]} origin  [lat0, lng0] del proyector (centro de ciudad)
+ * @returns {{states: Uint8Array, rings: Array}} states: 0=noche,1=sol,2=sombra
+ */
+export function computeShadowData(prepared, sun, coords, origin) {
+  const n = coords.length / 2;
+  const states = new Uint8Array(n);
+  const rings = [];
+  if (!sun.isUp) return { states, rings }; // todo 0 -> noche
+  const proj = makeProjector(origin[0], origin[1]);
+  const shadows = [];
+  for (const b of prepared) {
+    const s = buildShadow(b, sun, proj);
+    if (s) {
+      shadows.push(s);
+      rings.push(s.ringLngLat);
+    }
+  }
+  const index = buildShadowIndex(shadows);
+  for (let i = 0; i < n; i++) {
+    states[i] = isInAnyShadowIndexed([coords[2 * i], coords[2 * i + 1]], index, proj) ? 2 : 1;
+  }
+  return { states, rings };
+}
+
 /** Version lineal (sin indice). Se mantiene para tests. */
 export function isInAnyShadow(lngLat, shadows, proj) {
   const [px, py] = proj.toM(lngLat);

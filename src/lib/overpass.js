@@ -2,10 +2,11 @@
 // Sin API key. Usamos varios endpoints como fallback por si uno falla.
 
 import { loadHeights, lookupHeight } from './heights.js';
-import { cacheGet, cacheSet, cacheDelete, isFresh, TTL } from './cache.js';
+import { cacheGet, cacheSet, isFresh, TTL } from './cache.js';
 
-const BARS_KEY = 'bars_sevilla';
+const barsKey = (bbox) => `bars_${bbox.map((v) => v.toFixed(3)).join('_')}`;
 const buildingsKey = (bbox) => `buildings_${bbox.map((v) => v.toFixed(3)).join('_')}`;
+let lastBarsSavedAt = null;
 
 const ENDPOINTS = [
   'https://overpass-api.de/api/interpreter',
@@ -21,16 +22,17 @@ export const SEVILLA = {
   bbox: [37.30, -6.06, 37.46, -5.88],
 };
 
-function buildQuery(bbox) {
+function buildBarsQuery(bbox) {
   const [s, w, n, e] = bbox;
-  // Bares, pubs y biergarten con nombre dentro del bbox.
+  // Bares, pubs, cafés y restaurantes CON nombre dentro del bbox visible.
+  // `out body center` da coordenadas tanto de nodes como del centroide de ways.
   return `
     [out:json][timeout:25];
     (
-      node["amenity"~"^(bar|pub|biergarten)$"](${s},${w},${n},${e});
-      way["amenity"~"^(bar|pub|biergarten)$"](${s},${w},${n},${e});
+      node["amenity"~"^(bar|pub|cafe|restaurant)$"]["name"](${s},${w},${n},${e});
+      way["amenity"~"^(bar|pub|cafe|restaurant)$"]["name"](${s},${w},${n},${e});
     );
-    out center tags;`;
+    out body center;`;
 }
 
 /**
@@ -87,6 +89,8 @@ function normalize(el) {
     outdoorSeating: tags.outdoor_seating, // 'yes' | 'no' | undefined
     terrace: tags.terrace, // 'yes' | 'no' | undefined
     openingHours: tags.opening_hours, // expresión OSM (puede faltar)
+    phone: tags.phone || tags['contact:phone'] || '',
+    website: tags.website || tags['contact:website'] || '',
     address: [tags['addr:street'], tags['addr:housenumber']]
       .filter(Boolean)
       .join(' '),
@@ -180,12 +184,20 @@ export async function fetchBuildings(bbox, signal, { limit = 4000, force = false
   return out;
 }
 
-export async function fetchBars(bbox = SEVILLA.bbox, signal, { force = false } = {}) {
+/**
+ * Bares dentro de un bbox [s,w,n,e] del viewport. Caché por bbox con TTL de 1 h.
+ * `force` omite el caché (botón Recargar).
+ */
+export async function fetchBarsInBbox(bbox, signal, { force = false } = {}) {
+  const key = barsKey(bbox);
   if (!force) {
-    const rec = await cacheGet(BARS_KEY);
-    if (isFresh(rec, TTL.BARS)) return rec.value;
+    const rec = await cacheGet(key);
+    if (isFresh(rec, TTL.BARS)) {
+      lastBarsSavedAt = rec.savedAt;
+      return rec.value;
+    }
   }
-  const data = await overpassRace(buildQuery(bbox), signal);
+  const data = await overpassRace(buildBarsQuery(bbox), signal);
   const seen = new Set();
   const bars = [];
   for (const el of data.elements || []) {
@@ -194,17 +206,12 @@ export async function fetchBars(bbox = SEVILLA.bbox, signal, { force = false } =
     seen.add(b.id);
     bars.push(b);
   }
-  await cacheSet(BARS_KEY, bars);
+  await cacheSet(key, bars);
+  lastBarsSavedAt = Date.now();
   return bars;
 }
 
-/** Marca de tiempo del caché de bares (para "actualizado hace X"), o null. */
-export async function barsCacheInfo() {
-  const rec = await cacheGet(BARS_KEY);
-  return rec ? { savedAt: rec.savedAt } : null;
-}
-
-/** Borra el caché de bares para forzar una recarga desde Overpass. */
-export async function clearBarsCache() {
-  await cacheDelete(BARS_KEY);
+/** Marca de tiempo de la última carga de bares (para "actualizado hace X"). */
+export function barsCacheInfo() {
+  return lastBarsSavedAt ? { savedAt: lastBarsSavedAt } : null;
 }

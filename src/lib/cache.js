@@ -11,7 +11,7 @@ const VERSION = 1;
 
 // TTLs por tipo de dato.
 export const TTL = {
-  BARS: 24 * 60 * 60 * 1000, // 24 h
+  BARS: 60 * 60 * 1000, // 1 h (carga por viewport, los bares cambian poco)
   BUILDINGS: 72 * 60 * 60 * 1000, // 72 h
 };
 

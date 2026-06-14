@@ -17,6 +17,9 @@ una **vista 3D con la sombra REAL proyectada por los edificios**.
 |---|---|---|
 | Framework | **Vite + React 18** | Build estático rapidísimo, cero config para Vercel, mantenible. |
 | Mapa + 3D | **MapLibre GL JS** | WebGL, sin API key, soporta inclinación (pitch) y **extrusión 3D de edificios** (`fill-extrusion`). |
+| Búsqueda de ciudad | **Nominatim (OSM)** | Autocompletado y geocodificación inversa, sin API key. Escalable a toda España. |
+| Clustering | **supercluster** | Agrupa miles de marcadores por viewport; color por mayoría sol/sombra. |
+| Cálculo de sombras | **Web Worker** | El cálculo geométrico corre fuera del hilo principal (slider fluido). |
 | Teselas base | **CARTO dark (OSM)** | Estética modo oscuro, sin clave. |
 | Sol | **SunCalc** | Azimut/elevación calculados en el cliente, sin servidor. |
 | Sombras | **Geometría propia** (`lib/geometry.js`) | Proyección real de sombras sin dependencias externas. |
@@ -47,23 +50,56 @@ scripts/
   build-heights.mjs           # procesa el GML del Catastro -> seville-heights.json
 src/
   main.jsx              # punto de entrada
-  App.jsx               # estado (hora, bares, edificios, sombras, meteo, filtros, geo) + UI
+  App.jsx               # estado global (ciudad, hora, bares, edificios, sombras, filtros, geo) + UI
   index.css             # tema claro/oscuro, mobile-first, responsive
   components/
-    MapView.jsx         # MapLibre: base, extrusión 3D, capa de sombras, bares, popups
+    WelcomeScreen.jsx   # pantalla de inicio: buscador de ciudad + geolocalización
+    MapView.jsx         # MapLibre: base, extrusión 3D, sombras, clustering, popups
+    FilterBar.jsx       # barra de filtros sobre el mapa (sol / terraza / abiertos)
     TimeControls.jsx    # slider de hora, fecha y botón "Ahora"
     SunCompass.jsx      # brújula SVG con azimut y elevación
+  workers/
+    shadows.worker.js   # cálculo de sombras + estado de cada bar (fuera del hilo principal)
   lib/
-    overpass.js         # fetch de bares y edificios (endpoints en paralelo + caché)
+    nominatim.js        # búsqueda de ciudad y reverse geocoding (Nominatim)
+    city.js             # modelo de ciudad + persistencia en localStorage
+    viewport.js         # bbox del viewport (margen 20%) y decisión de recarga
+    cluster.js          # índice supercluster + color por mayoría sol/sombra
+    overpass.js         # fetch de bares por viewport y edificios (paralelo + caché)
     cache.js            # caché IndexedDB con TTL (idb)
     heights.js          # lookup de alturas reales del Catastro
     hours.js            # estado "abierto ahora" (opening_hours)
-    geo.js              # distancia haversine y score cercanía+sol
-    weather.js          # fetch + parseo de Open-Meteo
+    geo.js              # distancia haversine, círculo de precisión y score
+    weather.js          # fetch + parseo de Open-Meteo (caché por ciudad)
     sun.js              # posición solar (SunCalc) y utilidades
     classify.js         # heurística (2D) + clasificación por sombra real
     geometry.js         # proyección de sombras, índice espacial y tests
 ```
+
+## 🌍 Escalable a toda España + carga lazy
+
+La app ya no está fijada a Sevilla:
+
+1. **Pantalla de inicio** (`WelcomeScreen`): busca cualquier ciudad de España con
+   **Nominatim** (autocompletado con debounce de 300 ms y una sola petición
+   activa), o usa **tu ubicación** (geolocalización + reverse geocoding). La
+   última ciudad se guarda en `localStorage` y al reabrir salta directa al mapa.
+   Botón **"Cambiar ciudad"** en la cabecera.
+2. **Carga por viewport** (no por municipio entero): al dejar de mover el mapa
+   (`moveend`, debounce 600 ms) se calcula el bbox visible **+20% de margen**; si
+   aporta **>30% de área nueva** respecto a la última carga, se pide a Overpass
+   solo esa zona y se **fusiona** con los bares ya cargados (dedupe por id OSM).
+   Caché IndexedDB por bbox con **TTL de 1 h**. En memoria se mantienen como
+   mucho **2000 bares** (se descartan los más lejanos al centro del viewport).
+3. **Clustering** (`supercluster`, `radius 60`, `maxZoom 16`): los marcadores se
+   agrupan; el color del cluster es naranja si >60% están al sol, gris si >60% en
+   sombra, amarillo si es mixto. Click en un cluster → `flyTo` con `zoom+2`.
+4. **Sombras en Web Worker**: el cálculo geométrico (sombras de los edificios +
+   estado sol/sombra de cada bar) corre en `workers/shadows.worker.js`. El
+   resultado vuelve como `Uint8Array` **transferible** (sin copia); se descartan
+   respuestas obsoletas por `reqId` y se aplica con *throttling* de
+   `requestAnimationFrame`. Sin soporte de Worker, hay *fallback* al hilo
+   principal. Así mover el slider de hora no bloquea la UI.
 
 Flujo: `App` mantiene la **hora seleccionada** y recalcula la posición solar y la
 meteo. En **modo 3D** descarga los edificios del área visible, calcula sus
@@ -218,8 +254,13 @@ CLI: `npx vercel` (o `vercel --prod`).
 - **Overpass API** puede ir lenta o limitar peticiones; se consultan **varios
   endpoints en paralelo** y se usa el primero que responde.
 - La meteo de Open-Meteo es **previsión por hora** (~3 días), no observación.
-- El bounding box de bares cubre todo el municipio de Sevilla (incluido Sevilla
-  Este, Bellavista, Macarena, San Jerónimo, Triana/Los Remedios…).
+- Los bares se cargan **por viewport**: para verlos hay que mover/acercar el mapa
+  a la zona de interés (no se descarga la ciudad entera de golpe).
+- **Nominatim** limita a ~1 req/s. Se respeta con debounce y una sola petición
+  activa. Nota: los navegadores **no permiten** fijar la cabecera `User-Agent`
+  (la ignoran); Nominatim identifica la app por el `Referer` automático.
+- El índice de alturas del Catastro solo cubre Sevilla; en otras ciudades los
+  edificios sin altura en OSM usan el valor por defecto (~9 m).
 
 ## Mejoras futuras
 
