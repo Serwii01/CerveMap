@@ -20,7 +20,7 @@ una **vista 3D con la sombra REAL proyectada por los edificios**.
 | Búsqueda de ciudad | **Nominatim (OSM)** | Autocompletado y geocodificación inversa, sin API key. Escalable a toda España. |
 | Clustering | **supercluster** | Agrupa miles de marcadores por viewport; color por mayoría sol/sombra. |
 | Cálculo de sombras | **Web Worker** | El cálculo geométrico corre fuera del hilo principal (slider fluido). |
-| Teselas base | **CARTO dark (OSM)** | Estética modo oscuro, sin clave. |
+| Teselas base | **OpenFreeMap (OSM)** | Vectoriales, claro y oscuro, sin clave. |
 | Sol | **SunCalc** | Azimut/elevación calculados en el cliente, sin servidor. |
 | Sombras | **Geometría propia** (`lib/geometry.js`) | Proyección real de sombras sin dependencias externas. |
 | Meteo | **Open-Meteo** | Temperatura, nubosidad y código de cielo por hora, **sin API key**. |
@@ -284,5 +284,5 @@ CLI: `npx vercel` (o `vercel --prod`).
 
 Datos de mapa, bares y edificios © colaboradores de
 [OpenStreetMap](https://www.openstreetmap.org/copyright). Meteo por
-[Open-Meteo](https://open-meteo.com/). Teselas por [CARTO](https://carto.com/).
+[Open-Meteo](https://open-meteo.com/). Mapa base de [OpenFreeMap](https://openfreemap.org) (© OpenMapTiles).
 Render por [MapLibre GL JS](https://maplibre.org/).

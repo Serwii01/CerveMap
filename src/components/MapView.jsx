@@ -3,17 +3,11 @@ import maplibregl from 'maplibre-gl';
 import { buildClusterIndex, queryClusters } from '../lib/cluster.js';
 import { circlePolygon } from '../lib/geo.js';
 
-const CARTO_ATTR =
-  '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> · &copy; <a href="https://carto.com/">CARTO</a>';
-
-const tiles = (style) =>
-  ['a', 'b', 'c'].map(
-    (s) => `https://${s}.basemaps.cartocdn.com/${style}/{z}/{x}/{y}{r}.png`,
-  );
-
+// Mapa base de OpenFreeMap: gratis y sin clave. Antes eran las teselas raster de CARTO, que dejaron de
+// servirse sin API key y pintaban «API KEY REQUIRED» sobre todo el mapa. El estilo trae su atribución.
 const THEMES = {
   light: {
-    base: tiles('light_all'),
+    base: 'https://tiles.openfreemap.org/styles/positron',
     building: '#c9d1de',
     shadowFill: '#2f3c56',
     shadowFillOpacity: 0.5,
@@ -22,7 +16,7 @@ const THEMES = {
     barStroke: 'rgba(20,28,42,0.85)',
   },
   dark: {
-    base: tiles('dark_all'),
+    base: 'https://tiles.openfreemap.org/styles/dark',
     building: '#39414f',
     shadowFill: '#01030a',
     shadowFillOpacity: 0.45,
@@ -34,20 +28,45 @@ const THEMES = {
 
 const EMPTY = { type: 'FeatureCollection', features: [] };
 
-function makeStyle(theme) {
-  return {
-    version: 8,
-    // Glyphs públicos (sin clave) para las etiquetas de los clusters.
-    glyphs: 'https://fonts.openmaptiles.org/{fontstack}/{range}.pbf',
-    sources: {
-      carto: {
-        type: 'raster',
-        tiles: THEMES[theme].base,
-        tileSize: 256,
-        attribution: CARTO_ATTR,
-      },
-    },
-    layers: [{ id: 'carto', type: 'raster', source: 'carto' }],
+// Los estilos de OpenFreeMap rotulan en inglés («Seville»): mejor el nombre en español o, si no hay, el local.
+const LABEL_ES = ['coalesce', ['get', 'name:es'], ['get', 'name']];
+const isNameLabel = (l) =>
+  l.type === 'symbol' && JSON.stringify(l.layout?.['text-field'] ?? '').includes('name');
+
+// Fuentes y capas propias, que van encima del mapa base.
+const OWN_SOURCES = ['user-accuracy', 'shadows', 'buildings', 'clusters', 'bars'];
+
+// Colores de las capas propias que dependen del tema.
+function themedPaint(id, t) {
+  switch (id) {
+    case 'shadows':
+      return { 'fill-color': t.shadowFill, 'fill-opacity': t.shadowFillOpacity };
+    case 'shadows-outline':
+      return { 'line-color': t.shadowLine, 'line-opacity': t.shadowLineOpacity };
+    case 'buildings':
+      return { 'fill-extrusion-color': t.building };
+    case 'bars':
+      return { 'circle-stroke-color': t.barStroke };
+    default:
+      return {};
+  }
+}
+
+// Al cambiar de tema se carga otro estilo base entero; esto copia encima las fuentes y capas propias
+// (con sus datos) para no tener que volver a montarlas, ya con los colores del tema nuevo.
+function keepOwnLayers(theme) {
+  const t = THEMES[theme];
+  return (prev, next) => {
+    if (!prev) return next;
+    const sources = { ...next.sources };
+    for (const id of OWN_SOURCES) if (prev.sources[id]) sources[id] = prev.sources[id];
+    const own = prev.layers
+      .filter((l) => OWN_SOURCES.includes(l.source))
+      .map((l) => ({ ...l, paint: { ...l.paint, ...themedPaint(l.id, t) } }));
+    const base = next.layers.map((l) =>
+      isNameLabel(l) ? { ...l, layout: { ...l.layout, 'text-field': LABEL_ES } } : l,
+    );
+    return { ...next, sources, layers: [...base, ...own] };
   };
 }
 
@@ -143,7 +162,7 @@ export default function MapView({
   useEffect(() => {
     const map = new maplibregl.Map({
       container: containerRef.current,
-      style: makeStyle(themeRef.current),
+      style: THEMES[themeRef.current].base,
       center: initialCenter || [-5.9845, 37.3891],
       zoom: initialZoom,
       attributionControl: { compact: true },
@@ -165,6 +184,9 @@ export default function MapView({
     map.on('load', () => {
       const t = THEMES[themeRef.current];
       map.setLight(sunLight(sunRef.current));
+      for (const l of map.getStyle().layers) {
+        if (isNameLabel(l)) map.setLayoutProperty(l.id, 'text-field', LABEL_ES);
+      }
 
       map.addSource('user-accuracy', { type: 'geojson', data: EMPTY });
       map.addSource('shadows', { type: 'geojson', data: EMPTY });
@@ -313,14 +335,9 @@ export default function MapView({
   useEffect(() => {
     const map = mapRef.current;
     if (!map || !readyRef.current) return;
-    const t = THEMES[theme];
-    map.getSource('carto')?.setTiles(t.base);
-    map.setPaintProperty('shadows', 'fill-color', t.shadowFill);
-    map.setPaintProperty('shadows', 'fill-opacity', t.shadowFillOpacity);
-    map.setPaintProperty('shadows-outline', 'line-color', t.shadowLine);
-    map.setPaintProperty('shadows-outline', 'line-opacity', t.shadowLineOpacity);
-    map.setPaintProperty('buildings', 'fill-extrusion-color', t.building);
-    map.setPaintProperty('bars', 'circle-stroke-color', t.barStroke);
+    map.setStyle(THEMES[theme].base, { transformStyle: keepOwnLayers(theme) });
+    // El estilo nuevo trae su propia luz: vuelve a poner la del sol cuando termine de cargar.
+    map.once('style.load', () => map.setLight(sunLight(sunRef.current)));
   }, [theme]);
 
   // Vuela a un punto cuando cambia `focus`.

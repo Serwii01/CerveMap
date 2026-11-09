@@ -35,12 +35,19 @@ export default defineConfig({
         navigateFallback: '/index.html',
         runtimeCaching: [
           {
-            // Teselas base de CARTO: cache-first (el mapa sigue viéndose offline).
-            urlPattern: /^https:\/\/[a-c]\.basemaps\.cartocdn\.com\/.*/i,
+            // Estilos y TileJSON de OpenFreeMap: cambian de versión al regenerar el planeta (apuntan a
+            // teselas nuevas), así que se sirven de caché pero se refrescan siempre por detrás.
+            urlPattern: /^https:\/\/tiles\.openfreemap\.org\/(styles|planet)(\/|$)/i,
+            handler: 'StaleWhileRevalidate',
+            options: { cacheName: 'ofm-styles', cacheableResponse: { statuses: [0, 200] } },
+          },
+          {
+            // Teselas, fuentes e iconos: cache-first (el mapa sigue viéndose offline).
+            urlPattern: /^https:\/\/tiles\.openfreemap\.org\/.*/i,
             handler: 'CacheFirst',
             options: {
-              cacheName: 'carto-tiles',
-              expiration: { maxEntries: 600, maxAgeSeconds: 60 * 60 * 24 * 14 },
+              cacheName: 'ofm-tiles',
+              expiration: { maxEntries: 1500, maxAgeSeconds: 60 * 60 * 24 * 14 },
               cacheableResponse: { statuses: [0, 200] },
             },
           },
